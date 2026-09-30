@@ -61,10 +61,10 @@ async function appelerGeminiAvecSecours(contents, modelPrefere, apiKey) {
             }
         }
     }
-    throw new Error("Échec de tous les modèles testés :\n" + journalErreurs.join("\n"));
+    throw new Error("Échec des modèles testés :\n" + journalErreurs.join("\n"));
 }
 
-// ENDPOINT 1 : ANALYSE DU PDF EN BLOCS STRUCTURÉS (1 BLOC COURS + N BLOCS EXERCICES)
+// 1. ANALYSE DU PDF AVEC RESPECT STRICT DE L'INTÉGRITÉ DES PHRASES
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -75,42 +75,30 @@ app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
         const pdfBase64 = req.file.buffer.toString('base64');
 
         const prompt = `
-Tu es un professeur de FLE pour apprenants coréens. Analyse ce document et structure-le en modules/blocs indépendants :
+Tu es un professeur de FLE pour apprenants coréens. Analyse ce document et structure-le en modules pédagogiques :
 
-1. "titre" : Titre global de la leçon.
-2. "bloc_cours" :
-   - Contient un tableau "slides" de fiches de grammaire courtes (1 seule règle par fiche).
-   - Rédigé EN CORÉEN structuré et pédagogique avec exemples bilingues français/coréen.
-3. "blocs_exercices" :
-   - Crée UN BLOC DISTINCT pour CHAQUE exercice présent dans le document (ex: Exercice 1, Exercice 2, etc.).
-   - Pour chaque bloc, indique : "id" (ex: "exo_1", "exo_2"), "titre", "consigne" et la liste de "questions".
-   - Si phrases à compléter : utilise "____".
-   - Si questions de rédaction/conversation : consigne claire.
+EXIGENCE CRUCIALE D'INTÉGRITÉ DES PHRASES :
+- Chaque phrase extraite DOIT ÊTRE ENTIÈRE, avoir un sens grammatical complet du début à la fin et se terminer par sa ponctuation (. ou ?).
+- Si une phrase contient PLUSIEURS trous/verbes à conjuguer, conserve TOUTE la phrase avec ses multiples "____".
+  Exemple OBLIGATOIRE : "S'il pleut demain, on ____ (rester) à la maison, s'il fait beau on ____ (faire) un pique-nique."
+  Il est STRICTEMENT INTERDIT de couper la phrase en cours de route.
 
-Renvoie UNIQUEMENT un JSON strict :
+STRUCTURE JSON REQUISE :
 {
   "titre": "Titre de la leçon",
   "bloc_cours": {
     "titre": "Cours de Grammaire",
     "slides": [
-      { "numero": 1, "titre": "Titre fiche", "contenu_coreen": "Explications..." }
+      { "numero": 1, "titre": "Titre fiche", "contenu_coreen": "Explications claires en coréen avec exemples..." }
     ]
   },
   "blocs_exercices": [
     {
       "id": "exo_1",
-      "titre": "Exercice 1 : Répondre à la forme négative",
-      "consigne": "Répondez aux questions par une phrase complète à la forme négative.",
+      "titre": "Titre de l'exercice",
+      "consigne": "Consigne de l'exercice",
       "questions": [
-        { "q": "Tu vas aller où pendant les vacances ?" }
-      ]
-    },
-    {
-      "id": "exo_2",
-      "titre": "Exercice 2 : Réponses courtes",
-      "consigne": "Répondez avec des réponses courtes (Moi aussi, Pas moi, etc.).",
-      "questions": [
-        { "q": "Je n'aime pas étudier." }
+        { "q": "Phrase complète avec ____ (verbe)" }
       ]
     }
   ]
@@ -132,7 +120,7 @@ Renvoie UNIQUEMENT un JSON strict :
     }
 });
 
-// ENDPOINT 2 : CHAT IA POUR AJUSTER LE CONTENU
+// 2. CHAT IA
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -147,7 +135,7 @@ ${JSON.stringify(contenuActuel, null, 2)}
 INSTRUCTION DU PROFESSEUR :
 "${instruction}"
 
-Modifie le contenu selon la demande en conservant la structure JSON exacte (titre, bloc_cours, blocs_exercices).
+RÈGLE : Conserve toujours l'intégrité absolue des phrases complètes avec leurs trous "____".
 Renvoie UNIQUEMENT le JSON mis à jour :
 `;
 
