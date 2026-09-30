@@ -8,22 +8,23 @@ app.use(express.json());
 
 const upload = multer({ limits: { fileSize: 20 * 1024 * 1024 } });
 
+// Modèle officiel stable recommandé par Google
+const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+
 // Fonction pour déterminer la clé à utiliser
 function obtenirCleAPI(req) {
-    // 1. Clé transmise pour un élève spécifique
     const cleEleve = req.headers['x-custom-api-key'];
     if (cleEleve && cleEleve.trim().startsWith("AIzaSy")) {
         return cleEleve.trim();
     }
-    // 2. Sinon : votre clé professeur enregistrée sur Render
     return process.env.GEMINI_API_KEY;
 }
 
-// ENDPOINT 1 : ANALYSER LE PDF DE COURS DE FRANÇAIS
+// ENDPOINT 1 : ANALYSER LE PDF DE COURS
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
-        if (!apiKey) return res.status(500).json({ error: "Aucune clé API Gemini disponible." });
+        if (!apiKey) return res.status(500).json({ error: "Aucune clé API Gemini disponible sur Render." });
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
 
         const pdfBase64 = req.file.buffer.toString('base64');
@@ -60,7 +61,7 @@ Renvoie UNIQUEMENT un JSON strict sans texte autour :
 }
 `;
 
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -77,10 +78,15 @@ Renvoie UNIQUEMENT un JSON strict sans texte autour :
         const data = await response.json();
         if (data.error) return res.status(500).json({ error: data.error.message });
 
-        const resultat = JSON.parse(data.candidates[0].content.parts[0].text);
+        let texteGenere = data.candidates[0].content.parts[0].text;
+        // Nettoyage de sécurité au cas où l'IA ajoute des balises markdown ```json
+        texteGenere = texteGenere.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+
+        const resultat = JSON.parse(texteGenere);
         res.json(resultat);
 
     } catch (err) {
+        console.error("Erreur serveur :", err);
         res.status(500).json({ error: "Erreur analyse PDF : " + err.message });
     }
 });
@@ -89,7 +95,7 @@ Renvoie UNIQUEMENT un JSON strict sans texte autour :
 app.post('/api/evaluer-reponse', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
-        if (!apiKey) return res.status(500).json({ error: "Aucune clé API Gemini disponible." });
+        if (!apiKey) return res.status(500).json({ error: "Aucune clé API Gemini disponible sur Render." });
 
         const { question, reponseEleve, langue } = req.body;
         if (!reponseEleve) return res.json({ estCorrect: false, explication: "Pas de réponse." });
@@ -111,7 +117,7 @@ Renvoie UNIQUEMENT un JSON strict :
 }
 `;
 
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -121,7 +127,9 @@ Renvoie UNIQUEMENT un JSON strict :
         });
 
         const data = await response.json();
-        const resultat = JSON.parse(data.candidates[0].content.parts[0].text);
+        let texte = data.candidates[0].content.parts[0].text;
+        texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+        const resultat = JSON.parse(texte);
         res.json(resultat);
 
     } catch (err) {
