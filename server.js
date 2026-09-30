@@ -64,7 +64,7 @@ async function appelerGeminiAvecSecours(contents, modelPrefere, apiKey) {
     throw new Error("Échec des modèles testés :\n" + journalErreurs.join("\n"));
 }
 
-// 1. ANALYSE DU PDF AVEC RESPECT STRICT DE L'INTÉGRITÉ DES PHRASES
+// 1. ENDPOINT ANALYSE PDF (COURS & BLOCS)
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -76,51 +76,34 @@ app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
 
         const prompt = `
 Tu es un professeur de FLE pour apprenants coréens. Analyse ce document et structure-le en modules pédagogiques :
+RÈGLE CRUCIALE : Chaque phrase à trous doit être ENTIÈRE jusqu'au point final. Si plusieurs verbes à conjuguer, conserve toute la phrase avec ses multiples "____".
 
-EXIGENCE CRUCIALE D'INTÉGRITÉ DES PHRASES :
-- Chaque phrase extraite DOIT ÊTRE ENTIÈRE, avoir un sens grammatical complet du début à la fin et se terminer par sa ponctuation (. ou ?).
-- Si une phrase contient PLUSIEURS trous/verbes à conjuguer, conserve TOUTE la phrase avec ses multiples "____".
-  Exemple OBLIGATOIRE : "S'il pleut demain, on ____ (rester) à la maison, s'il fait beau on ____ (faire) un pique-nique."
-  Il est STRICTEMENT INTERDIT de couper la phrase en cours de route.
-
-STRUCTURE JSON REQUISE :
+Structure JSON :
 {
   "titre": "Titre de la leçon",
   "bloc_cours": {
     "titre": "Cours de Grammaire",
-    "slides": [
-      { "numero": 1, "titre": "Titre fiche", "contenu_coreen": "Explications claires en coréen avec exemples..." }
-    ]
+    "slides": [ { "numero": 1, "titre": "Titre fiche", "contenu_coreen": "Explications..." } ]
   },
   "blocs_exercices": [
     {
       "id": "exo_1",
-      "titre": "Titre de l'exercice",
-      "consigne": "Consigne de l'exercice",
-      "questions": [
-        { "q": "Phrase complète avec ____ (verbe)" }
-      ]
+      "titre": "Titre exercice",
+      "consigne": "Consigne",
+      "questions": [ { "q": "Phrase avec ____ (verbe)" } ]
     }
   ]
 }
 `;
-
-        const contents = [{
-            parts: [
-                { text: prompt },
-                { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }
-            ]
-        }];
-
+        const contents = [{ parts: [{ text: prompt }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
         const resultatJson = await appelerGeminiAvecSecours(contents, modelChoisi, apiKey);
         res.json(resultatJson);
-
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// 2. CHAT IA
+// 2. ENDPOINT CHAT IA AJUSTEMENT PDF
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -128,15 +111,65 @@ app.post('/api/ajuster-contenu', async (req, res) => {
         const { contenuActuel, instruction } = req.body;
 
         const prompt = `
-Tu es un professeur de FLE pour élèves coréens.
-Voici le cours actuel découpé en bloc cours et blocs d'exercices :
+Tu es un professeur de FLE pour élèves coréens. Voici le cours actuel :
 ${JSON.stringify(contenuActuel, null, 2)}
-
-INSTRUCTION DU PROFESSEUR :
-"${instruction}"
-
-RÈGLE : Conserve toujours l'intégrité absolue des phrases complètes avec leurs trous "____".
+INSTRUCTION DU PROFESSEUR : "${instruction}"
 Renvoie UNIQUEMENT le JSON mis à jour :
+`;
+        const contents = [{ parts: [{ text: prompt }] }];
+        const resultatJson = await appelerGeminiAvecSecours(contents, modelChoisi, apiKey);
+        res.json(resultatJson);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 3. ENDPOINT LOUISON (CORRECTION PÉDAGOGIQUE STRICTE SILLYTAVERN)
+app.post('/api/corriger-louison', async (req, res) => {
+    try {
+        const apiKey = obtenirCleAPI(req);
+        if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
+
+        const modelChoisi = req.headers['x-gemini-model'] || 'gemini-3.8-flash';
+        const { question, reponseEleve } = req.body;
+
+        if (!reponseEleve || !reponseEleve.trim()) {
+            return res.json({
+                reponse_amicale: "Tu n'as rien écrit ! N'aie pas peur d'essayer. 😊",
+                ce_qui_est_bien: "Rien pour l'instant.",
+                les_fautes: "La réponse est vide.",
+                phrase_corrigee: "Écris une phrase complète.",
+                ameliorations: "Lance-toi !"
+            });
+        }
+
+        const prompt = `
+Tu es Emma, une amie française bienveillante (A2-B1).
+Tu dialogues avec un apprenant de français (niveau A1/A2).
+
+Question posée : "${question}"
+Phrase écrite par l'élève : "${reponseEleve}"
+
+[INSTRUCTIONS RP]
+- Ton : Amical, simple, chaleureux, naturel (Français A1/A2, pas d'argot).
+- Rédige une réponse amicale et courte (1-2 phrases) en réagissant à ce qu'il a dit.
+
+[INSTRUCTIONS DE CORRECTION - ANTI-HALLUCINATION STRICTE]
+Tu es un correcteur JUSTE et PRÉCIS.
+1. Regarde VRAIMENT la phrase de l'élève.
+2. Si la 1ère lettre est une majuscule -> INTERDICTION ABSOLUE de dire qu'elle manque.
+3. Si le dernier caractère est un point (.) ou point d'interrogation (?) -> INTERDICTION de dire qu'il manque.
+4. Ne corrige que les VRAIES fautes (grammaire, conjugaison, orthographe, virgule obligatoire après Oui/Non).
+5. SI LA PHRASE EST CORRECTE : Dans "les_fautes", écris "Aucune faute majeure !". Ne cherche pas la petite bête.
+
+Renvoie UNIQUEMENT un objet JSON respectant cette structure exacte :
+{
+  "reponse_amicale": "Réponse amicale et naturelle de Emma...",
+  "ce_qui_est_bien": "Ce qui est réussi (ex: Bonne conjugaison, vocabulaire pertinent)...",
+  "les_fautes": "Les fautes réelles ou 'Aucune faute majeure !'...",
+  "phrase_corrigee": "La phrase complète corrigée...",
+  "ameliorations": "Conseil d'amélioration ou 'Rien d'autre, c'est très bien !'..."
+}
 `;
 
         const contents = [{ parts: [{ text: prompt }] }];
