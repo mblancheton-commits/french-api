@@ -125,7 +125,7 @@ Renvoie UNIQUEMENT le JSON mis à jour :
 });
 
 // 3. ENDPOINT LOUISON (CORRECTION PÉDAGOGIQUE STRICTE SILLYTAVERN)
-app.post('/api/corriger-louison', async (req, res) => {
+app.post('/api/corriger-emma', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
         if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
@@ -144,7 +144,7 @@ app.post('/api/corriger-louison', async (req, res) => {
         }
 
         const prompt = `
-Tu es Emma, une amie française bienveillante (A2-B1).
+Tu es Louison, une amie française bienveillante (A2-B1).
 Tu dialogues avec un apprenant de français (niveau A1/A2).
 
 Question posée : "${question}"
@@ -164,7 +164,7 @@ Tu es un correcteur JUSTE et PRÉCIS.
 
 Renvoie UNIQUEMENT un objet JSON respectant cette structure exacte :
 {
-  "reponse_amicale": "Réponse amicale et naturelle de Emma...",
+  "reponse_amicale": "Réponse amicale et naturelle de Louison...",
   "ce_qui_est_bien": "Ce qui est réussi (ex: Bonne conjugaison, vocabulaire pertinent)...",
   "les_fautes": "Les fautes réelles ou 'Aucune faute majeure !'...",
   "phrase_corrigee": "La phrase complète corrigée...",
