@@ -16,14 +16,8 @@ function obtenirCleAPI(req) {
 
 const attendre = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function appelerGeminiAvecSecours(contents, modelPrefere, apiKey) {
-    const modelesDisponibles = [
-        modelPrefere || 'gemini-3.8-flash',
-        'gemini-3.7-flash',
-        'gemini-3.6-flash',
-        'gemini-3.5-flash'
-    ];
-    const listeAtester = [...new Set(modelesDisponibles)];
+async function appelerGeminiAvecSecours(contents, modelesPrioritaires, apiKey) {
+    const listeAtester = [...new Set(modelesPrioritaires)];
     let journalErreurs = [];
 
     for (const modele of listeAtester) {
@@ -64,7 +58,7 @@ async function appelerGeminiAvecSecours(contents, modelPrefere, apiKey) {
     throw new Error("Échec des modèles testés :\n" + journalErreurs.join("\n"));
 }
 
-// 1. ENDPOINT ANALYSE PDF (COURS & BLOCS)
+// 1. ENDPOINT ANALYSE PDF (COURS & BLOCS) - EXCLUSIVEMENT 3.8 FLASH
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -96,14 +90,15 @@ Structure JSON :
 }
 `;
         const contents = [{ parts: [{ text: prompt }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
-        const resultatJson = await appelerGeminiAvecSecours(contents, modelChoisi, apiKey);
+        // Priorité stricte sur 3.8 Flash demandée
+        const resultatJson = await appelerGeminiAvecSecours(contents, [modelChoisi, 'gemini-3.8-flash'], apiKey);
         res.json(resultatJson);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// 2. ENDPOINT CHAT IA AJUSTEMENT PDF
+// 2. ENDPOINT AJUSTEMENT PDF
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -117,63 +112,81 @@ INSTRUCTION DU PROFESSEUR : "${instruction}"
 Renvoie UNIQUEMENT le JSON mis à jour :
 `;
         const contents = [{ parts: [{ text: prompt }] }];
-        const resultatJson = await appelerGeminiAvecSecours(contents, modelChoisi, apiKey);
+        const resultatJson = await appelerGeminiAvecSecours(contents, [modelChoisi, 'gemini-3.8-flash', 'gemini-3.7-flash'], apiKey);
         res.json(resultatJson);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// 3. ENDPOINT LOUISON (CORRECTION PÉDAGOGIQUE STRICTE SILLYTAVERN)
+// 3. ENDPOINT EMMA : CORRECTION ET EXPLICATIONS DANS LA LANGUE DE L'ÉLÈVE
 app.post('/api/corriger-emma', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
         if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
 
-        const modelChoisi = req.headers['x-gemini-model'] || 'gemini-3.8-flash';
-        const { question, reponseEleve } = req.body;
+        const { question, reponseEleve, langue } = req.body;
+        const langCode = (langue || 'fr').toLowerCase();
+
+        let consigneLangue = "Donne toutes tes explications grammaticales en Français.";
+        let nomLangue = "français";
+        if (langCode === 'ko') {
+            consigneLangue = "Rédige TOUTES les explications pédagogiques (ce qui est bien, fautes, améliorations) en CORÉEN (한국어). Traduis aussi la réponse amicale et la phrase corrigée en coréen.";
+            nomLangue = "coréen";
+        } else if (langCode === 'en') {
+            consigneLangue = "Rédige TOUTES les explications pédagogiques (ce qui est bien, fautes, améliorations) en ANGLAIS. Traduis aussi la réponse amicale et la phrase corrigée en anglais.";
+            nomLangue = "anglais";
+        }
 
         if (!reponseEleve || !reponseEleve.trim()) {
             return res.json({
                 reponse_amicale: "Tu n'as rien écrit ! N'aie pas peur d'essayer. 😊",
-                ce_qui_est_bien: "Rien pour l'instant.",
-                les_fautes: "La réponse est vide.",
+                traduction_reponse: langCode === 'ko' ? "아무것도 쓰지 않았어요! 두려워하지 말고 시도해 보세요. 😊" : (langCode === 'en' ? "You wrote nothing! Don't be afraid to try. 😊" : ""),
+                ce_qui_est_bien: langCode === 'ko' ? "아직 없음." : "Rien pour l'instant.",
+                les_fautes: langCode === 'ko' ? "답변이 비어 있습니다." : "La réponse est vide.",
                 phrase_corrigee: "Écris une phrase complète.",
-                ameliorations: "Lance-toi !"
+                traduction_phrase_corrigee: langCode === 'ko' ? "완전한 문장을 작성하세요." : (langCode === 'en' ? "Write a full sentence." : ""),
+                ameliorations: langCode === 'ko' ? "직접 작성해 보세요!" : "Lance-toi !"
             });
         }
 
         const prompt = `
-Tu es Louison, une amie française bienveillante (A2-B1).
-Tu dialogues avec un apprenant de français (niveau A1/A2).
+Tu es Emma, une amie française bienveillante (A2-B1).
+Tu dialogues avec un apprenant de français.
 
 Question posée : "${question}"
 Phrase écrite par l'élève : "${reponseEleve}"
+Langue cible pour les explications de l'élève : ${nomLangue}.
 
-[INSTRUCTIONS RP]
-- Ton : Amical, simple, chaleureux, naturel (Français A1/A2, pas d'argot).
-- Rédige une réponse amicale et courte (1-2 phrases) en réagissant à ce qu'il a dit.
+[INSTRUCTIONS DE LANGUE]
+${consigneLangue}
+- La réponse amicale d'Emma doit TOUJOURS être en Français naturel et simple (A2-B1).
+- Si la langue n'est pas le français, donne la traduction de cette réponse dans le champ "traduction_reponse".
+- Donne la traduction de la phrase corrigée dans "traduction_phrase_corrigee".
 
 [INSTRUCTIONS DE CORRECTION - ANTI-HALLUCINATION STRICTE]
-Tu es un correcteur JUSTE et PRÉCIS.
-1. Regarde VRAIMENT la phrase de l'élève.
-2. Si la 1ère lettre est une majuscule -> INTERDICTION ABSOLUE de dire qu'elle manque.
+1. Regarde VRAIMENT la phrase écrite par l'élève.
+2. Si la 1ère lettre est une majuscule -> INTERDICTION de dire qu'elle manque.
 3. Si le dernier caractère est un point (.) ou point d'interrogation (?) -> INTERDICTION de dire qu'il manque.
-4. Ne corrige que les VRAIES fautes (grammaire, conjugaison, orthographe, virgule obligatoire après Oui/Non).
-5. SI LA PHRASE EST CORRECTE : Dans "les_fautes", écris "Aucune faute majeure !". Ne cherche pas la petite bête.
+4. Ne corrige que les VRAIES fautes (grammaire, conjugaison, orthographe, vocabulaire).
+5. Si la phrase est correcte, indique clairement qu'il n'y a pas de faute.
 
-Renvoie UNIQUEMENT un objet JSON respectant cette structure exacte :
+Renvoie UNIQUEMENT un objet JSON sous ce format :
 {
-  "reponse_amicale": "Réponse amicale et naturelle de Louison...",
-  "ce_qui_est_bien": "Ce qui est réussi (ex: Bonne conjugaison, vocabulaire pertinent)...",
-  "les_fautes": "Les fautes réelles ou 'Aucune faute majeure !'...",
-  "phrase_corrigee": "La phrase complète corrigée...",
-  "ameliorations": "Conseil d'amélioration ou 'Rien d'autre, c'est très bien !'..."
+  "reponse_amicale": "Réponse en français...",
+  "traduction_reponse": "Traduction de la réponse en ${nomLangue} (laisse vide si langue == fr)",
+  "ce_qui_est_bien": "Explications dans la langue choisie...",
+  "les_fautes": "Fautes expliquées dans la langue choisie...",
+  "phrase_corrigee": "Phrase correcte en français...",
+  "traduction_phrase_corrigee": "Traduction de la phrase corrigée en ${nomLangue} (laisse vide si langue == fr)",
+  "ameliorations": "Conseils dans la langue choisie..."
 }
 `;
 
         const contents = [{ parts: [{ text: prompt }] }];
-        const resultatJson = await appelerGeminiAvecSecours(contents, modelChoisi, apiKey);
+        // Essaye 3.8 Flash, puis cascade vers 3.7, 3.6 et 3.5
+        const listeModelesEmma = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash'];
+        const resultatJson = await appelerGeminiAvecSecours(contents, listeModelesEmma, apiKey);
         res.json(resultatJson);
 
     } catch (err) {
