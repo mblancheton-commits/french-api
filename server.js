@@ -9,7 +9,7 @@ app.use(express.json());
 const upload = multer({ limits: { fileSize: 20 * 1024 * 1024 } });
 
 // Modèle officiel stable recommandé par Google
-const MODEL_NAME = 'gemini-3.8-flash';
+const MODEL_NAME = 'gemini-3.7-flash';
 
 // Fonction pour déterminer la clé à utiliser
 function obtenirCleAPI(req) {
