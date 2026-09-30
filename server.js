@@ -8,104 +8,124 @@ app.use(express.json());
 
 const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
 
-// Fonction pour déterminer la clé API (celle de l'élève si transmise, sinon celle du prof)
+// Fonction pour déterminer la clé API (clé élève en header ou clé prof sur Render)
 function obtenirCleAPI(req) {
     const cleEleve = req.headers['x-custom-api-key'];
     if (cleEleve && cleEleve.trim().startsWith("AIzaSy")) return cleEleve.trim();
     return process.env.GEMINI_API_KEY;
 }
 
-// FONCTION AVEC RÉESSAI AUTOMATIQUE (FALLBACK) SUR LES MODÈLES GEMINI
+// Fonction de pause asynchrone (pour gérer les surcharges Google)
+const attendre = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// APPEL AVEC SECOURS STRICT SUR LA GAMME FLASH 3.x (3.7, 3.8, 3.6, 3.5)
 async function appelerGeminiAvecSecours(contents, modelPrefere, apiKey) {
-    // Liste des modèles dans l'ordre de priorité
-    const modelesFallback = [
-        modelPrefere || 'gemini-3.8-flash',
+    // Liste ordonnée des modèles Flash disponibles
+    const modelesDisponibles = [
+        modelPrefere || 'gemini-3.7-flash',
         'gemini-3.7-flash',
-        'gemini-2.0-flash',
-        'gemini-1.5-flash'
+        'gemini-3.8-flash',
+        'gemini-3.6-flash',
+        'gemini-3.5-flash'
     ];
-    // Éliminer les doublons
-    const modelesAtester = [...new Set(modelesFallback)];
+    // Élimination des doublons
+    const listeAtester = [...new Set(modelesDisponibles)];
 
-    let derniereErreur = null;
+    let journalErreurs = [];
 
-    for (const modele of modelesAtester) {
-        try {
-            console.log(`Tentative avec le modèle : ${modele}...`);
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modele}:generateContent?key=${apiKey}`;
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: contents,
-                    generationConfig: { responseMimeType: "application/json" }
-                })
-            });
+    for (const modele of listeAtester) {
+        console.log(`[IA] Essai avec le modèle : ${modele}...`);
+        
+        // Tentative avec 1 réessai en cas de surcharge (503/429)
+        for (let tentative = 1; tentative <= 2; tentative++) {
+            try {
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${modele}:generateContent?key=${apiKey}`;
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: contents,
+                        generationConfig: { responseMimeType: "application/json" }
+                    })
+                });
 
-            const data = await response.json();
+                const data = await response.json();
 
-            // Si Google renvoie une erreur de modèle indisponible ou quota
-            if (data.error) {
-                console.warn(`Modèle ${modele} a échoué : ${data.error.message}. Bascule sur le modèle de secours...`);
-                derniereErreur = data.error.message;
-                continue; // Passer au modèle suivant
+                if (data.error) {
+                    const code = data.error.code || response.status;
+                    const msg = data.error.message || "Erreur inconnue";
+                    console.warn(`[IA] Échec ${modele} (tentative ${tentative}) : [Code ${code}] ${msg}`);
+
+                    // Si le modèle est surchargé (503 ou 429), attendre 2 secondes et réessayer une fois
+                    if ((code === 503 || code === 429) && tentative === 1) {
+                        console.log(`[IA] Modèle ${modele} surchargé. Pause de 2 secondes avant réessai...`);
+                        await attendre(2000);
+                        continue;
+                    }
+
+                    journalErreurs.push(`${modele}: [Code ${code}] ${msg}`);
+                    break; // Passer au modèle suivant
+                }
+
+                if (data.candidates && data.candidates[0].content.parts[0].text) {
+                    let texte = data.candidates[0].content.parts[0].text;
+                    texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+                    console.log(`[IA] Succès avec le modèle : ${modele} !`);
+                    return JSON.parse(texte);
+                }
+            } catch (err) {
+                console.warn(`[IA] Erreur réseau avec ${modele} : ${err.message}`);
+                journalErreurs.push(`${modele}: ${err.message}`);
+                break;
             }
-
-            if (data.candidates && data.candidates[0].content.parts[0].text) {
-                let texte = data.candidates[0].content.parts[0].text;
-                texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-                return JSON.parse(texte);
-            }
-        } catch (err) {
-            console.warn(`Erreur réseau avec ${modele} : ${err.message}. Test du modèle suivant...`);
-            derniereErreur = err.message;
         }
     }
 
-    throw new Error("Tous les modèles Gemini ont échoué. Dernière erreur : " + derniereErreur);
+    // Si tous les modèles ont échoué, renvoyer le rapport détaillé
+    throw new Error("Échec de tous les modèles testés :\n" + journalErreurs.join("\n"));
 }
 
-// 1. ENDPOINT ANALYSE PDF (COURS EN MICRO-FICHES + EXERCICES SÉPARÉS)
+// ENDPOINT 1 : ANALYSE DU PDF EN FICHES ATOMIQUES ET EXERCICES
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
-        if (!apiKey) return res.status(500).json({ error: "Aucune clé API Gemini configurée." });
+        if (!apiKey) return res.status(500).json({ error: "Aucune clé API Gemini disponible." });
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
 
-        const modelChoisi = req.headers['x-gemini-model'] || 'gemini-3.8-flash';
+        const modelChoisi = req.headers['x-gemini-model'] || 'gemini-3.7-flash';
         const pdfBase64 = req.file.buffer.toString('base64');
 
         const prompt = `
-Tu es un professeur de FLE pour apprenants coréens. Analyse ce document PDF et sépare STRICTEMENT le cours théorique et les exercices :
+Tu es un professeur de FLE pour apprenants coréens. Analyse ce document PDF de cours et d'exercices de français :
 
-RÈGLES IMPORTANTES :
-1. "slides_cours" (Micro-learning) :
-   - Découpe la grammaire en MICRO-FICHES ATOMIQUES (1 règle ou 1 nuance par slide).
-   - Ne fais JAMAIS de gros bloc de texte indigeste.
-   - Rédigé EN CORÉEN structuré et pédagogique avec puces et exemples en français expliqués en coréen.
-   - Donne un titre clair à chaque slide (ex: "1. La négation simple", "2. Ne...plus (sens et prononciation)").
+RÈGLES STRICTES DE DÉCOUPAGE :
+1. "slides_cours" (Fiches de cours atomiques - Micro-learning) :
+   - Découpe la grammaire en fiches courtes et indépendantes (1 seule règle ou nuance par fiche).
+   - Entièrement rédigé en coréen clair et pédagogique.
+   - Donne un titre clair à chaque fiche (ex: "1. La négation simple", "2. Ne...plus (sens et prononciation)").
+   - Inclus des exemples en français expliqués en coréen.
 
 2. "exercices" (Sections pratiques) :
    - Extrais les exercices sous forme de sections distinctes.
-   - S'il y a des phrases à trous : utilise "____".
-   - S'il y a des questions ouvertes de conversation/rédaction : classe-les dans questions_ouvertes.
+   - S'il y a des phrases à compléter : utilise "____".
+   - S'il y a des questions ouvertes de conversation/rédaction : conserve-les clairement formulées.
 
 Structure JSON obligatoire :
 {
-  "titre": "Titre du chapitre",
+  "titre": "Titre de la leçon",
   "slides_cours": [
     {
       "numero": 1,
       "titre": "Titre de la fiche",
-      "contenu_coreen": "Explications claires en coréen avec exemples bilingues..."
+      "contenu_coreen": "Explications en coréen avec exemples..."
     }
   ],
   "exercices": [
     {
-      "titre": "Section 1 : Répondre à la forme négative",
-      "consigne": "Répondez aux questions par une phrase complète à la forme négative.",
+      "titre": "Section d'exercice",
+      "consigne": "Consigne éventuelle",
       "questions": [
-        { "q": "Tu vas aller où pendant les vacances ?", "type": "text" }
+        { "q": "Question ou phrase", "type": "text" }
       ]
     }
   ]
@@ -128,13 +148,13 @@ Structure JSON obligatoire :
     }
 });
 
-// 2. ENDPOINT CHAT / DIALOGUE AVEC L'IA POUR AJUSTER LE CONTENU
+// ENDPOINT 2 : CHAT / AJUSTEMENT INTERACTIF
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
         if (!apiKey) return res.status(500).json({ error: "Aucune clé API disponible." });
 
-        const modelChoisi = req.headers['x-gemini-model'] || 'gemini-3.8-flash';
+        const modelChoisi = req.headers['x-gemini-model'] || 'gemini-3.7-flash';
         const { contenuActuel, instruction } = req.body;
 
         if (!contenuActuel || !instruction) {
@@ -146,14 +166,10 @@ Tu es un professeur de FLE pour élèves coréens.
 Voici le contenu actuel d'un cours structuré en fiches de grammaire et exercices :
 ${JSON.stringify(contenuActuel, null, 2)}
 
-INSTRUCTION PRÉCISE DU PROFESSEUR :
+INSTRUCTION DU PROFESSEUR :
 "${instruction}"
 
-Consignes :
-1. Applique scrupuleusement la demande du professeur.
-2. Conserve la même structure JSON (titre, slides_cours, exercices).
-3. Assure-toi que les explications de grammaire restent en coréen structuré et clair.
-
+Applique la demande du professeur en conservant la structure JSON exacte (titre, slides_cours, exercices).
 Renvoie UNIQUEMENT le JSON mis à jour :
 `;
 
@@ -164,6 +180,20 @@ Renvoie UNIQUEMENT le JSON mis à jour :
     } catch (err) {
         console.error("Erreur serveur ajustement :", err);
         res.status(500).json({ error: err.message });
+    }
+});
+
+// ENDPOINT 3 : DIAGNOSTIC DIRECT DES MODÈLES DISPONIBLES SUR VOTRE CLÉ
+app.get('/api/verifier-modeles', async (req, res) => {
+    try {
+        const apiKey = obtenirCleAPI(req);
+        if (!apiKey) return res.json({ erreur: "Pas de clé GEMINI_API_KEY sur Render." });
+
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        const data = await response.json();
+        res.json(data);
+    } catch(e) {
+        res.status(500).json({ erreur: e.message });
     }
 });
 
