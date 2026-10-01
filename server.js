@@ -37,7 +37,7 @@ async function appelerGeminiAvecSecours(contents, modelesPrioritaires, apiKey) {
                 if (data.error) {
                     const code = data.error.code || response.status;
                     if ((code === 503 || code === 429) && tentative === 1) {
-                        await attendre(2000);
+                        await attendre(1500);
                         continue;
                     }
                     journalErreurs.push(`${modele}: [Code ${code}] ${data.error.message}`);
@@ -58,14 +58,13 @@ async function appelerGeminiAvecSecours(contents, modelesPrioritaires, apiKey) {
     throw new Error("Échec des modèles testés :\n" + journalErreurs.join("\n"));
 }
 
-// 1. ENDPOINT ANALYSE PDF (COURS & BLOCS) - EXCLUSIVEMENT 3.8 FLASH
+// 1. ENDPOINT ANALYSE PDF (COURS & BLOCS) - EXCLUSIVEMENT GEMINI 3.8 FLASH
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
         if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
 
-        const modelChoisi = req.headers['x-gemini-model'] || 'gemini-3.8-flash';
         const pdfBase64 = req.file.buffer.toString('base64');
 
         const prompt = `
@@ -90,19 +89,18 @@ Structure JSON :
 }
 `;
         const contents = [{ parts: [{ text: prompt }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
-        // Priorité stricte sur 3.8 Flash demandée
-        const resultatJson = await appelerGeminiAvecSecours(contents, [modelChoisi, 'gemini-3.8-flash'], apiKey);
+        // STRICTEMENT GEMINI 3.8 FLASH (aucun repli autorisé sur ce point crucial)
+        const resultatJson = await appelerGeminiAvecSecours(contents, ['gemini-3.8-flash'], apiKey);
         res.json(resultatJson);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// 2. ENDPOINT AJUSTEMENT PDF
+// 2. ENDPOINT AJUSTEMENT PDF - GEMINI 3.8 FLASH
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
-        const modelChoisi = req.headers['x-gemini-model'] || 'gemini-3.8-flash';
         const { contenuActuel, instruction } = req.body;
 
         const prompt = `
@@ -112,14 +110,14 @@ INSTRUCTION DU PROFESSEUR : "${instruction}"
 Renvoie UNIQUEMENT le JSON mis à jour :
 `;
         const contents = [{ parts: [{ text: prompt }] }];
-        const resultatJson = await appelerGeminiAvecSecours(contents, [modelChoisi, 'gemini-3.8-flash', 'gemini-3.7-flash'], apiKey);
+        const resultatJson = await appelerGeminiAvecSecours(contents, ['gemini-3.8-flash'], apiKey);
         res.json(resultatJson);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// 3. ENDPOINT EMMA : CORRECTION ET EXPLICATIONS DANS LA LANGUE DE L'ÉLÈVE
+// 3. ENDPOINT EMMA : EXCLUSIVEMENT LES MODÈLES LITE (500 RPD) - JAMAIS EN FLASH NORMAL
 app.post('/api/corriger-emma', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -184,9 +182,15 @@ Renvoie UNIQUEMENT un objet JSON sous ce format :
 `;
 
         const contents = [{ parts: [{ text: prompt }] }];
-        // Essaye 3.8 Flash, puis cascade vers 3.7, 3.6 et 3.5
-        const listeModelesEmma = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash'];
-        const resultatJson = await appelerGeminiAvecSecours(contents, listeModelesEmma, apiKey);
+
+        // UNIQUEMENT LES MODÈLES LITE (500 RPD) - AUCUN FLASH NORMAL POUR NE PAS GASPILLER LE QUOTA DE 20 RPD
+        const modelesLiteUniquement = [
+            'gemini-3.5-flash-lite',
+            'gemini-3.1-flash-lite',
+            'gemini-2.5-flash-lite'
+        ];
+
+        const resultatJson = await appelerGeminiAvecSecours(contents, modelesLiteUniquement, apiKey);
         res.json(resultatJson);
 
     } catch (err) {
