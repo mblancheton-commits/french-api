@@ -58,7 +58,7 @@ async function appelerGeminiAvecSecours(contents, modelesPrioritaires, apiKey) {
     throw new Error("Échec des modèles testés :\n" + journalErreurs.join("\n"));
 }
 
-// 1. ENDPOINT ANALYSE PDF (COURS & BLOCS) - EXCLUSIVEMENT GEMINI 3.8 FLASH
+// 1. ENDPOINT ANALYSE PDF (COURS, POINTS CLÉS TRILINGUES, QUIZ THÉORIQUE & EXERCICES) - GEMINI 3.8 FLASH EXCLUSIF
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -68,28 +68,71 @@ app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
         const pdfBase64 = req.file.buffer.toString('base64');
 
         const prompt = `
-Tu es un professeur de FLE pour apprenants coréens. Analyse ce document et structure-le en modules pédagogiques :
-RÈGLE CRUCIALE : Chaque phrase à trous doit être ENTIÈRE jusqu'au point final. Si plusieurs verbes à conjuguer, conserve toute la phrase avec ses multiples "____".
+Tu es un professeur expert de Français Langue Étrangère (FLE). Analyse ce document pédagogique en profondeur et structure-le rigoureusement.
 
-Structure JSON :
+Tu dois impérativement générer :
+1. "points_importants" : Les notions clés et règles essentielles du cours, rédigées en TROIS LANGUES (français, anglais, coréen).
+2. "bloc_cours" : Les fiches théoriques du cours avec explications claires et exemples.
+3. "quiz_theorique" : Un questionnaire de compréhension théorique (3 à 5 questions) pour valider l'assimilation des règles du cours avant de faire les exercices pratiques. Chaque question, ses options et son explication doivent être fournies dans les TROIS LANGUES.
+4. "blocs_exercices" : Les exercices pratiques d'application. RÈGLE CRUCIALE : Chaque phrase à trous doit être ENTIÈRE jusqu'au point final. Conserve toute la phrase avec ses "____".
+
+Structure JSON STRICTE à renvoyer :
 {
   "titre": "Titre de la leçon",
+  "points_importants": {
+    "fr": ["Point clé 1...", "Point clé 2..."],
+    "en": ["Key point 1...", "Key point 2..."],
+    "ko": ["핵심 포인트 1...", "핵심 포인트 2..."]
+  },
   "bloc_cours": {
-    "titre": "Cours de Grammaire",
-    "slides": [ { "numero": 1, "titre": "Titre fiche", "contenu_coreen": "Explications..." } ]
+    "titre": "Cours théorique",
+    "slides": [
+      {
+        "numero": 1,
+        "titre": "Titre de la section",
+        "contenu_fr": "Explications en français...",
+        "contenu_en": "Explanations in English...",
+        "contenu_ko": "한국어 설명..."
+      }
+    ]
+  },
+  "quiz_theorique": {
+    "titre": "Quiz de vérification du cours",
+    "questions": [
+      {
+        "id": 1,
+        "question": {
+          "fr": "Question sur la règle de grammaire en français ?",
+          "en": "Question in English ?",
+          "ko": "한국어 질문 ?"
+        },
+        "options": {
+          "fr": ["Option A", "Option B", "Option C"],
+          "en": ["Option A", "Option B", "Option C"],
+          "ko": ["보기 A", "보기 B", "보기 C"]
+        },
+        "reponse_correcte_index": 0,
+        "explication": {
+          "fr": "Explication de la réponse...",
+          "en": "Explanation...",
+          "ko": "정답 해설..."
+        }
+      }
+    ]
   },
   "blocs_exercices": [
     {
       "id": "exo_1",
-      "titre": "Titre exercice",
-      "consigne": "Consigne",
-      "questions": [ { "q": "Phrase avec ____ (verbe)" } ]
+      "titre": "Exercice d'application",
+      "consigne": "Complétez les phrases.",
+      "questions": [
+        { "q": "Phrase modèle avec ____ pour le mot à trouver." }
+      ]
     }
   ]
 }
 `;
         const contents = [{ parts: [{ text: prompt }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
-        // STRICTEMENT GEMINI 3.8 FLASH (aucun repli autorisé sur ce point crucial)
         const resultatJson = await appelerGeminiAvecSecours(contents, ['gemini-3.8-flash'], apiKey);
         res.json(resultatJson);
     } catch (err) {
@@ -97,14 +140,14 @@ Structure JSON :
     }
 });
 
-// 2. ENDPOINT AJUSTEMENT PDF - GEMINI 3.8 FLASH
+// 2. ENDPOINT AJUSTEMENT PDF
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
         const { contenuActuel, instruction } = req.body;
 
         const prompt = `
-Tu es un professeur de FLE pour élèves coréens. Voici le cours actuel :
+Tu es un professeur de FLE. Voici le cours actuel :
 ${JSON.stringify(contenuActuel, null, 2)}
 INSTRUCTION DU PROFESSEUR : "${instruction}"
 Renvoie UNIQUEMENT le JSON mis à jour :
@@ -117,7 +160,7 @@ Renvoie UNIQUEMENT le JSON mis à jour :
     }
 });
 
-// 3. ENDPOINT EMMA : EXCLUSIVEMENT LES MODÈLES LITE (500 RPD) - JAMAIS EN FLASH NORMAL
+// 3. ENDPOINT EMMA : EXCLUSIVEMENT LES MODÈLES LITE (500 RPD)
 app.post('/api/corriger-emma', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
@@ -182,8 +225,6 @@ Renvoie UNIQUEMENT un objet JSON sous ce format :
 `;
 
         const contents = [{ parts: [{ text: prompt }] }];
-
-        // UNIQUEMENT LES MODÈLES LITE (500 RPD) - AUCUN FLASH NORMAL POUR NE PAS GASPILLER LE QUOTA DE 20 RPD
         const modelesLiteUniquement = [
             'gemini-3.5-flash-lite',
             'gemini-3.1-flash-lite',
@@ -191,6 +232,56 @@ Renvoie UNIQUEMENT un objet JSON sous ce format :
         ];
 
         const resultatJson = await appelerGeminiAvecSecours(contents, modelesLiteUniquement, apiKey);
+        res.json(resultatJson);
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 4. ENDPOINT GÉNÉRATION D'ENTRAÎNEMENT (FLASH LITE)
+app.post('/api/generer-entrainement', async (req, res) => {
+    try {
+        const apiKey = obtenirCleAPI(req);
+        if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
+
+        const { titreSource, contexteExemples, format, nbPhrases } = req.body;
+        const nombre = Math.min(Math.max(parseInt(nbPhrases) || 5, 3), 15);
+        const typeFormat = format === 'text' ? 'text' : 'select';
+
+        const prompt = `
+Tu es un professeur de FLE créant des exercices d'entraînement pour un élève.
+Devoir modèle source : "${titreSource}"
+Exemples de contenu : ${JSON.stringify(contexteExemples || []).slice(0, 800)}
+
+Crée exactement ${nombre} nouvelles phrases d'entraînement sur le MÊME sujet ou thème grammatical.
+RÈGLES :
+1. Chaque phrase doit comporter un trou marqué par "____".
+2. Le trou correspond à la difficulté travaillée.
+${typeFormat === 'select' ? '- Donne 3 ou 4 options de choix dont la bonne réponse.' : '- Précise la ou les réponses acceptées.'}
+
+Structure JSON :
+{
+  "titre": "Entraînement : ${titreSource}",
+  "phrases": [
+    {
+      "q": "Phrase modèle avec ____.",
+      "type": "${typeFormat}",
+      ${typeFormat === 'select' ? '"options": ["choix1", "choix2", "choix3"],' : ''}
+      "a": ["bonne_reponse"]
+    }
+  ]
+}
+`;
+
+        const contents = [{ parts: [{ text: prompt }] }];
+        const modelesLite = [
+            'gemini-3.5-flash-lite',
+            'gemini-3.1-flash-lite',
+            'gemini-2.5-flash-lite'
+        ];
+
+        const resultatJson = await appelerGeminiAvecSecours(contents, modelesLite, apiKey);
         res.json(resultatJson);
 
     } catch (err) {
