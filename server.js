@@ -25,8 +25,8 @@ function obtenirCleNanoGPT(req) {
     return process.env.NANOGPT_API_KEY;
 }
 
-// --- MOTEUR 1 : APPEL GOOGLE GEMINI ---
-async function appelerGemini(contents, model, apiKey) {
+// --- APPEL STRICT GOOGLE GEMINI (AUCUN FALLBACK) ---
+async function appelerGeminiStrict(contents, model, apiKey) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const response = await fetch(url, {
         method: 'POST',
@@ -40,50 +40,61 @@ async function appelerGemini(contents, model, apiKey) {
     const data = await response.json();
     if (data.error) throw new Error(`[Gemini] ${data.error.message || JSON.stringify(data.error)}`);
 
-    if (data.candidates && data.candidates[0].content.parts[0].text) {
+    if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts[0].text) {
         let texte = data.candidates[0].content.parts[0].text;
         texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
         return JSON.parse(texte);
     }
-    throw new Error("Réponse Gemini vide ou non analysable.");
+    throw new Error("Réponse vide reçue de Gemini.");
 }
 
-// --- MOTEUR 2 : APPEL NANOGPT (OPENAI COMPATIBLE) ---
-async function appelerNanoGPT(messages, model, apiKey) {
+// --- APPEL STRICT NANOGPT (AUCUN FALLBACK, GESTION DU REASONING/THINKING) ---
+async function appelerNanoGPTStrict(messages, model, apiKey) {
     if (!apiKey) throw new Error("Clé API NanoGPT manquante.");
 
     const response = await fetch("https://nano-gpt.com/api/v1/chat/completions", {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`
+            "Authorization": `Bearer ${apiKey}`,
+            "x-api-key": apiKey
         },
         body: JSON.stringify({
-            model: model,
+            model: model, // Exécutera STRICTEMENT le modèle choisi
             messages: messages,
             temperature: 0.2
         })
     });
 
     const data = await response.json();
-    if (data.error) throw new Error(`[NanoGPT] ${data.error.message || JSON.stringify(data.error)}`);
+    if (data.error) throw new Error(`[NanoGPT - ${model}] ${data.error.message || JSON.stringify(data.error)}`);
 
-    if (data.choices && data.choices[0].message && data.choices[0].message.content) {
-        let texte = data.choices[0].message.content;
+    if (data.choices && data.choices[0] && data.choices[0].message) {
+        let texte = data.choices[0].message.content || "";
+
+        // Nettoyer les balises de raisonnement <think>...</think> générées par les modèles thinking
+        texte = texte.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
         texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-        const match = texte.match(/\{[\s\S]*\}/);
-        if (match) return JSON.parse(match[0]);
+
+        // Extraction précise de l'objet JSON
+        const premierCrochet = texte.indexOf('{');
+        const dernierCrochet = texte.lastIndexOf('}');
+        if (premierCrochet !== -1 && dernierCrochet !== -1) {
+            texte = texte.substring(premierCrochet, dernierCrochet + 1);
+        }
+
         return JSON.parse(texte);
     }
-    throw new Error("Réponse NanoGPT vide ou non analysable.");
+    throw new Error(`Aucune réponse exploitable renvoyée par ${model}.`);
 }
 
-// 1. ENDPOINT ANALYSE PDF (GEMINI OU NANOGPT)
+// 1. ENDPOINT ANALYSE PDF
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
 
-        const modelChoisi = req.headers['x-model-choice'] || 'qwen3-235b-a22b';
+        const modelChoisi = req.headers['x-model-choice'] || 'qwen/qwen3-235b-a22b-thinking-2507';
+        
         const promptStructure = `
 Tu es un professeur expert de Français Langue Étrangère (FLE). Analyse ce document pédagogique et structure-le rigoureusement.
 
@@ -93,7 +104,7 @@ Tu dois impérativement générer :
 3. "quiz_theorique" : Un questionnaire de compréhension théorique (3 à 5 questions) pour valider l'assimilation des règles du cours avant de faire les exercices pratiques. Chaque question, ses options et son explication doivent être fournies dans les TROIS LANGUES.
 4. "blocs_exercices" : Les exercices pratiques d'application. RÈGLE CRUCIALE : Chaque phrase à trous doit être ENTIÈRE jusqu'au point final. Conserve toute la phrase avec ses "____".
 
-Structure JSON STRICTE attendue :
+Structure JSON STRICTE attendue (ne renvoie rien d'autre que ce JSON) :
 {
   "titre": "Titre de la leçon",
   "points_importants": {
@@ -150,37 +161,35 @@ Structure JSON STRICTE attendue :
 }
 `;
 
-        // SI MODÈLE GOOGLE GEMINI NATIVE
+        // SI GEMINI
         if (modelChoisi.startsWith("gemini")) {
             const apiKey = obtenirCleGemini(req);
             if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
             const pdfBase64 = req.file.buffer.toString('base64');
             const contents = [{ parts: [{ text: promptStructure }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
-            const resultat = await appelerGemini(contents, modelChoisi, apiKey);
+            const resultat = await appelerGeminiStrict(contents, modelChoisi, apiKey);
             return res.json(resultat);
         }
 
-        // SI MODÈLE NANOGPT (Qwen ou DeepSeek)
+        // SI NANOGPT (QWEN OU DEEPSEEK - STRICTEMENT LE MODÈLE DEMANDÉ)
         const apiKeyNano = obtenirCleNanoGPT(req);
         if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente. Veuillez la renseigner." });
 
-        // Extraction sécurisée du texte PDF (gère fonction directe ou objet exporté)
         let texteExtrait = "";
         try {
             const fnParser = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
             const donneesPdf = await fnParser(req.file.buffer);
             texteExtrait = (donneesPdf && donneesPdf.text) ? donneesPdf.text : "";
         } catch(eParser) {
-            console.error("Erreur parser PDF :", eParser);
-            throw new Error("Impossible d'extraire le texte du PDF : " + eParser.message);
+            throw new Error("Impossible de lire le texte du PDF : " + eParser.message);
         }
 
         const messages = [
-            { role: "system", content: "Tu es un professeur de français FLE. Réponds TOUJOURS au format JSON strict." },
-            { role: "user", content: `${promptStructure}\n\n[CONTENU TEXTE DU DOCUMENT PDF] :\n${texteExtrait}` }
+            { role: "system", content: "Tu es un professeur de français FLE. Réponds STRICTEMENT au format JSON demandé sans aucun commentaire." },
+            { role: "user", content: `${promptStructure}\n\n[CONTENU DU DOCUMENT PDF] :\n${texteExtrait}` }
         ];
 
-        const resultat = await appelerNanoGPT(messages, modelChoisi, apiKeyNano);
+        const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
         res.json(resultat);
 
     } catch (err) {
@@ -193,7 +202,7 @@ Structure JSON STRICTE attendue :
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const { contenuActuel, instruction } = req.body;
-        const modelChoisi = req.headers['x-model-choice'] || 'qwen3-235b-a22b';
+        const modelChoisi = req.headers['x-model-choice'] || 'qwen/qwen3-235b-a22b-thinking-2507';
 
         const prompt = `
 Tu es un professeur de FLE. Voici le cours actuel en JSON :
@@ -202,14 +211,14 @@ ${JSON.stringify(contenuActuel, null, 2)}
 INSTRUCTION DU PROFESSEUR :
 "${instruction}"
 
-Applique les changements et renvoie le JSON complet mis à jour (conserve points_importants en 3 langues, quiz_theorique en 3 langues, bloc_cours et blocs_exercices) :
+Applique les changements et renvoie STRICTEMENT le JSON complet mis à jour (conserve points_importants en 3 langues, quiz_theorique en 3 langues, bloc_cours et blocs_exercices) :
 `;
 
         if (modelChoisi.startsWith("gemini")) {
             const apiKey = obtenirCleGemini(req);
             if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
             const contents = [{ parts: [{ text: prompt }] }];
-            const resultat = await appelerGemini(contents, modelChoisi, apiKey);
+            const resultat = await appelerGeminiStrict(contents, modelChoisi, apiKey);
             return res.json(resultat);
         }
 
@@ -217,11 +226,11 @@ Applique les changements et renvoie le JSON complet mis à jour (conserve points
         if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
 
         const messages = [
-            { role: "system", content: "Réponds UNIQUEMENT en JSON strict sans fioritures." },
+            { role: "system", content: "Réponds STRICTEMENT en JSON." },
             { role: "user", content: prompt }
         ];
 
-        const resultat = await appelerNanoGPT(messages, modelChoisi, apiKeyNano);
+        const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
         res.json(resultat);
 
     } catch (err) {
@@ -294,11 +303,11 @@ Structure JSON :
         let resJson = null;
         for (const m of modeles) {
             try {
-                resJson = await appelerGemini(contents, m, apiKey);
+                resJson = await appelerGeminiStrict(contents, m, apiKey);
                 if (resJson) break;
             } catch(e) {}
         }
-        if (!resJson) throw new Error("Les modèles Flash Lite sont momentanément indisponibles.");
+        if (!resJson) throw new Error("Modèles Flash Lite momentanément indisponibles.");
         res.json(resJson);
 
     } catch (err) {
@@ -340,7 +349,7 @@ Structure JSON :
         let resJson = null;
         for (const m of modeles) {
             try {
-                resJson = await appelerGemini(contents, m, apiKey);
+                resJson = await appelerGeminiStrict(contents, m, apiKey);
                 if (resJson) break;
             } catch(e) {}
         }
