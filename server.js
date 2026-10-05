@@ -144,13 +144,25 @@ Structure JSON STRICTE à renvoyer :
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const apiKey = obtenirCleAPI(req);
+        if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
         const { contenuActuel, instruction } = req.body;
 
         const prompt = `
-Tu es un professeur de FLE. Voici le cours actuel :
+Tu es un professeur expert de FLE. Voici le cours complet actuellement généré (au format JSON) :
 ${JSON.stringify(contenuActuel, null, 2)}
-INSTRUCTION DU PROFESSEUR : "${instruction}"
-Renvoie UNIQUEMENT le JSON mis à jour :
+
+INSTRUCTION PRÉCISE DU PROFESSEUR :
+"${instruction}"
+
+RÈGLES IMPÉRATIVES :
+1. Applique scrupuleusement la demande du professeur.
+2. Conserve TOUJOURS la structure JSON complète :
+   - "titre"
+   - "points_importants" (avec ses sous-clés "fr", "en", "ko")
+   - "bloc_cours" (avec ses slides et contenus "contenu_fr", "contenu_en", "contenu_ko")
+   - "quiz_theorique" (questions, options en 3 langues, reponse_correcte_index, explication en 3 langues)
+   - "blocs_exercices" (avec phrases complètes et trous "____")
+3. Renvoie UNIQUEMENT le JSON mis à jour, sans aucun texte autour.
 `;
         const contents = [{ parts: [{ text: prompt }] }];
         const resultatJson = await appelerGeminiAvecSecours(contents, ['gemini-3.8-flash'], apiKey);
