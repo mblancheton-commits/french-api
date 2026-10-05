@@ -25,6 +25,42 @@ function obtenirCleNanoGPT(req) {
     return process.env.NANOGPT_API_KEY;
 }
 
+// NETTOYEUR ET RÉPARATEUR DE JSON STRICT (ANTI-CORRUPTION DES SAUTS DE LIGNE)
+function reparerEtParserJSON(texteBrut) {
+    let t = texteBrut;
+
+    // 1. Supprimer les balises <think>...</think>
+    t = t.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+    // 2. Supprimer les balises markdown ```json
+    t = t.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+
+    // 3. Isoler l'objet JSON entre la première accolade et la dernière
+    const premier = t.indexOf('{');
+    const dernier = t.lastIndexOf('}');
+    if (premier !== -1 && dernier !== -1) {
+        t = t.substring(premier, dernier + 1);
+    }
+
+    try {
+        return JSON.parse(t);
+    } catch (ePremierEssai) {
+        // En cas d'erreur de saut de ligne non échappé à l'intérieur d'une chaîne
+        try {
+            // Remplacer les retours à la ligne physiques non échappés par \n
+            const tNettoye = t.replace(/[\r\n]+/g, (match, offset, str) => {
+                // Si le retour à la ligne se trouve entre guillemets
+                return "\\n\\n";
+            });
+            return JSON.parse(tNettoye);
+        } catch (eDeuxiemeEssai) {
+            console.error("Échec du parse JSON. Début du texte :", t.slice(0, 500));
+            console.error("Fin du texte :", t.slice(-500));
+            throw new Error("L'IA a produit une réponse JSON incomplète ou mal formée. Erreur : " + ePremierEssai.message);
+        }
+    }
+}
+
 // --- APPEL STRICT GOOGLE GEMINI ---
 async function appelerGeminiStrict(contents, model, apiKey) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -44,9 +80,7 @@ async function appelerGeminiStrict(contents, model, apiKey) {
     if (data.error) throw new Error(`[Gemini] ${data.error.message || JSON.stringify(data.error)}`);
 
     if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts[0].text) {
-        let texte = data.candidates[0].content.parts[0].text;
-        texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-        return JSON.parse(texte);
+        return reparerEtParserJSON(data.candidates[0].content.parts[0].text);
     }
     throw new Error("Réponse vide reçue de Gemini.");
 }
@@ -74,24 +108,12 @@ async function appelerNanoGPTStrict(messages, model, apiKey) {
     if (data.error) throw new Error(`[NanoGPT - ${model}] ${data.error.message || JSON.stringify(data.error)}`);
 
     if (data.choices && data.choices[0] && data.choices[0].message) {
-        let texte = data.choices[0].message.content || "";
-
-        // Nettoyer les balises thinking <think>...</think>
-        texte = texte.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-        texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-
-        const premierCrochet = texte.indexOf('{');
-        const dernierCrochet = texte.lastIndexOf('}');
-        if (premierCrochet !== -1 && dernierCrochet !== -1) {
-            texte = texte.substring(premierCrochet, dernierCrochet + 1);
-        }
-
-        return JSON.parse(texte);
+        return reparerEtParserJSON(data.choices[0].message.content || "");
     }
     throw new Error(`Aucune réponse exploitable renvoyée par ${model}.`);
 }
 
-// 1. ENDPOINT ANALYSE PDF (AVEC SAUT DE LIGNE À CHAQUE PHRASE DU COURS)
+// 1. ENDPOINT ANALYSE PDF (STRUCTURE STABLE SANS RISQUE DE SYNTAXE JSON)
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
@@ -101,13 +123,13 @@ app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
         const promptStructure = `
 Tu es un professeur expert de FLE. Analyse ce document et structure-le rigoureusement.
 
-RÈGLE DE MISE EN PAGE DU COURS (CRUCIALE) :
-- Dans chaque fiche de cours (dans "contenu_fr", "contenu_en" et "contenu_ko"), tu as l'OBLIGATION de faire un saut de ligne double (deux retours à la ligne: \\n\\n) APRÈS CHAQUE PHRASE OU EXEMPLE.
-- Interdiction absolue de faire des paragraphes compacts ou des blocs de texte denses. Chaque explication, règle ou phrase d'exemple doit être isolée sur sa propre ligne avec un espacement vertical aéré.
-
 RÈGLE D'EXHAUSTIVITÉ DES EXERCICES :
 - Tu DOIS inclure ABSOLUMENT TOUTES LES PHRASES d'exercices présentes dans le document, de la première à la toute dernière.
-- Chaque phrase à trous doit être ENTIÈRE, conservée du premier mot jusqu'au point final, avec ses trous "____".
+- Chaque phrase à trous doit être ENTIÈRE jusqu'au point final, avec ses trous "____".
+
+RÈGLE DU COURS AÉRÉ :
+- Pour chaque slide de cours, renvoie un tableau de phrases ou paragraphes ("phrases_fr", "phrases_en", "phrases_ko").
+- Chaque élément du tableau correspond à une seule phrase ou un exemple.
 
 Structure JSON STRICTE à respecter :
 {
@@ -118,9 +140,9 @@ Structure JSON STRICTE à respecter :
       {
         "numero": 1,
         "titre": "Titre de la section",
-        "contenu_fr": "Première phrase de cours explicative.\\n\\nDeuxième phrase avec une règle précise.\\n\\nExemple : Je vais manger une pomme.\\n\\nAutre exemple : Nous allons partir bientôt.",
-        "contenu_en": "First explanatory sentence.\\n\\nSecond sentence detailing the rule.\\n\\nExample: I am going to eat an apple.\\n\\nAnother example: We are leaving soon.",
-        "contenu_ko": "첫 번째 문법 설명 문장입니다.\\n\\n두 번째 구체적인 규칙 설명 문장입니다.\\n\\n예문: Je vais manger une pomme.\\n\\n다른 예문: Nous allons partir bientôt."
+        "phrases_fr": ["Première phrase explicative.", "Deuxième phrase de règle.", "Exemple : Je mange une pomme.", "Exemple : Nous partons."],
+        "phrases_en": ["First explanation sentence.", "Second rule sentence.", "Example: I eat an apple.", "Example: We leave."],
+        "phrases_ko": ["첫 번째 설명 문장입니다.", "두 번째 문법 규칙 문장입니다.", "예문: Je mange une pomme.", "예문: Nous partons."]
       }
     ]
   },
@@ -135,7 +157,7 @@ Structure JSON STRICTE à respecter :
       {
         "id": 1,
         "question": {
-          "fr": "Question sur la règle en français ?",
+          "fr": "Question en français ?",
           "en": "Question in English ?",
           "ko": "한국어 질문 ?"
         },
@@ -156,58 +178,55 @@ Structure JSON STRICTE à respecter :
   "blocs_exercices": [
     {
       "id": "exo_1",
-      "titre": "Titre de l'exercice 1",
+      "titre": "Titre exercice 1",
       "consigne": "Consigne complète",
       "questions": [
-        { "q": "TOUTES les phrases de l'exercice 1 sans en omettre une seule avec ____." }
-      ]
-    },
-    {
-      "id": "exo_2",
-      "titre": "Titre de l'exercice 2",
-      "consigne": "Consigne complète",
-      "questions": [
-        { "q": "TOUTES les phrases de l'exercice 2 sans en omettre une seule avec ____." }
+        { "q": "TOUTES les phrases du PDF avec ses trous ____." }
       ]
     }
   ]
 }
 `;
 
+        let resultatJson = null;
+
         if (modelChoisi.startsWith("gemini")) {
             const apiKey = obtenirCleGemini(req);
             if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
             const pdfBase64 = req.file.buffer.toString('base64');
             const contents = [{ parts: [{ text: promptStructure }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
-            const resultat = await appelerGeminiStrict(contents, modelChoisi, apiKey);
-            return res.json(resultat);
-        }
+            resultatJson = await appelerGeminiStrict(contents, modelChoisi, apiKey);
+        } else {
+            const apiKeyNano = obtenirCleNanoGPT(req);
+            if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente. Veuillez la renseigner." });
 
-        const apiKeyNano = obtenirCleNanoGPT(req);
-        if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente. Veuillez la renseigner." });
-
-        let texteExtrait = "";
-        try {
-            const fnParser = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
-            const donneesPdf = await fnParser(req.file.buffer);
-            texteExtrait = (donneesPdf && donneesPdf.text) ? donneesPdf.text : "";
-        } catch(eParser) {
-            throw new Error("Impossible de lire le texte du PDF : " + eParser.message);
-        }
-
-        const messages = [
-            { 
-                role: "system", 
-                content: "Tu es un professeur de FLE rigoureux. Dans les fiches de cours, tu mets impérativement un double saut de ligne (\\n\\n) après chaque phrase. Tu réponds STRICTEMENT au format JSON." 
-            },
-            { 
-                role: "user", 
-                content: `${promptStructure}\n\n[CONTENU DU DOCUMENT PDF SOURCE] :\n${texteExtrait}` 
+            let texteExtrait = "";
+            try {
+                const fnParser = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
+                const donneesPdf = await fnParser(req.file.buffer);
+                texteExtrait = (donneesPdf && donneesPdf.text) ? donneesPdf.text : "";
+            } catch(eParser) {
+                throw new Error("Impossible de lire le texte du PDF : " + eParser.message);
             }
-        ];
 
-        const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
-        res.json(resultat);
+            const messages = [
+                { role: "system", content: "Tu es un professeur de FLE. Réponds TOUJOURS au format JSON strict." },
+                { role: "user", content: `${promptStructure}\n\n[DOCUMENT PDF SOURCE] :\n${texteExtrait}` }
+            ];
+
+            resultatJson = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
+        }
+
+        // Post-traitement automatique : fusionne les tableaux de phrases en texte avec double saut de ligne
+        if (resultatJson && resultatJson.bloc_cours && Array.isArray(resultatJson.bloc_cours.slides)) {
+            resultatJson.bloc_cours.slides.forEach(s => {
+                if (Array.isArray(s.phrases_fr)) s.contenu_fr = s.phrases_fr.join("\n\n");
+                if (Array.isArray(s.phrases_en)) s.contenu_en = s.phrases_en.join("\n\n");
+                if (Array.isArray(s.phrases_ko)) s.contenu_ko = s.phrases_ko.join("\n\n");
+            });
+        }
+
+        res.json(resultatJson);
 
     } catch (err) {
         console.error("Erreur analyser-pdf :", err);
@@ -228,30 +247,30 @@ ${JSON.stringify(contenuActuel, null, 2)}
 INSTRUCTION DU PROFESSEUR :
 "${instruction}"
 
-RÈGLES :
-1. Dans chaque fiche de cours, sépare CHAQUE phrase par un double saut de ligne (\\n\\n).
-2. Conserve impérativement TOUTES les phrases des exercices.
+RÈGLE : Conserve impérativement TOUTES les phrases des exercices.
 Renvoie STRICTEMENT le JSON complet mis à jour :
 `;
+
+        let resultatJson = null;
 
         if (modelChoisi.startsWith("gemini")) {
             const apiKey = obtenirCleGemini(req);
             if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
             const contents = [{ parts: [{ text: prompt }] }];
-            const resultat = await appelerGeminiStrict(contents, modelChoisi, apiKey);
-            return res.json(resultat);
+            resultatJson = await appelerGeminiStrict(contents, modelChoisi, apiKey);
+        } else {
+            const apiKeyNano = obtenirCleNanoGPT(req);
+            if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
+
+            const messages = [
+                { role: "system", content: "Réponds STRICTEMENT en JSON sans fioritures." },
+                { role: "user", content: prompt }
+            ];
+
+            resultatJson = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
         }
 
-        const apiKeyNano = obtenirCleNanoGPT(req);
-        if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
-
-        const messages = [
-            { role: "system", content: "Réponds STRICTEMENT en JSON en respectant les sauts de ligne entre chaque phrase." },
-            { role: "user", content: prompt }
-        ];
-
-        const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
-        res.json(resultat);
+        res.json(resultatJson);
 
     } catch (err) {
         res.status(500).json({ error: err.message });
