@@ -25,7 +25,7 @@ function obtenirCleNanoGPT(req) {
     return process.env.NANOGPT_API_KEY;
 }
 
-// --- APPEL STRICT GOOGLE GEMINI (AUCUN FALLBACK) ---
+// --- APPEL STRICT GOOGLE GEMINI ---
 async function appelerGeminiStrict(contents, model, apiKey) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const response = await fetch(url, {
@@ -33,7 +33,10 @@ async function appelerGeminiStrict(contents, model, apiKey) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             contents: contents,
-            generationConfig: { responseMimeType: "application/json" }
+            generationConfig: { 
+                responseMimeType: "application/json",
+                maxOutputTokens: 16000
+            }
         })
     });
 
@@ -48,7 +51,7 @@ async function appelerGeminiStrict(contents, model, apiKey) {
     throw new Error("Réponse vide reçue de Gemini.");
 }
 
-// --- APPEL STRICT NANOGPT (AUCUN FALLBACK, GESTION DU REASONING/THINKING) ---
+// --- APPEL STRICT NANOGPT ---
 async function appelerNanoGPTStrict(messages, model, apiKey) {
     if (!apiKey) throw new Error("Clé API NanoGPT manquante.");
 
@@ -60,9 +63,10 @@ async function appelerNanoGPTStrict(messages, model, apiKey) {
             "x-api-key": apiKey
         },
         body: JSON.stringify({
-            model: model, // Exécutera STRICTEMENT le modèle choisi
+            model: model,
             messages: messages,
-            temperature: 0.2
+            temperature: 0.1,
+            max_tokens: 16000
         })
     });
 
@@ -72,11 +76,10 @@ async function appelerNanoGPTStrict(messages, model, apiKey) {
     if (data.choices && data.choices[0] && data.choices[0].message) {
         let texte = data.choices[0].message.content || "";
 
-        // Nettoyer les balises de raisonnement <think>...</think> générées par les modèles thinking
+        // Nettoyer les balises thinking <think>...</think>
         texte = texte.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
         texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
 
-        // Extraction précise de l'objet JSON
         const premierCrochet = texte.indexOf('{');
         const dernierCrochet = texte.lastIndexOf('}');
         if (premierCrochet !== -1 && dernierCrochet !== -1) {
@@ -88,41 +91,43 @@ async function appelerNanoGPTStrict(messages, model, apiKey) {
     throw new Error(`Aucune réponse exploitable renvoyée par ${model}.`);
 }
 
-// 1. ENDPOINT ANALYSE PDF
+// 1. ENDPOINT ANALYSE PDF (AVEC SAUT DE LIGNE À CHAQUE PHRASE DU COURS)
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
 
-        const modelChoisi = req.headers['x-model-choice'] || 'qwen/qwen3-235b-a22b-thinking-2507';
+        const modelChoisi = req.headers['x-model-choice'] || 'deepseek/deepseek-v4.1-flash:thinking';
         
         const promptStructure = `
-Tu es un professeur expert de Français Langue Étrangère (FLE). Analyse ce document pédagogique et structure-le rigoureusement.
+Tu es un professeur expert de FLE. Analyse ce document et structure-le rigoureusement.
 
-Tu dois impérativement générer :
-1. "points_importants" : Les notions clés du cours, rédigées en TROIS LANGUES (français, anglais, coréen).
-2. "bloc_cours" : Les fiches théoriques du cours avec explications claires et exemples (en français, anglais et coréen).
-3. "quiz_theorique" : Un questionnaire de compréhension théorique (3 à 5 questions) pour valider l'assimilation des règles du cours avant de faire les exercices pratiques. Chaque question, ses options et son explication doivent être fournies dans les TROIS LANGUES.
-4. "blocs_exercices" : Les exercices pratiques d'application. RÈGLE CRUCIALE : Chaque phrase à trous doit être ENTIÈRE jusqu'au point final. Conserve toute la phrase avec ses "____".
+RÈGLE DE MISE EN PAGE DU COURS (CRUCIALE) :
+- Dans chaque fiche de cours (dans "contenu_fr", "contenu_en" et "contenu_ko"), tu as l'OBLIGATION de faire un saut de ligne double (deux retours à la ligne: \\n\\n) APRÈS CHAQUE PHRASE OU EXEMPLE.
+- Interdiction absolue de faire des paragraphes compacts ou des blocs de texte denses. Chaque explication, règle ou phrase d'exemple doit être isolée sur sa propre ligne avec un espacement vertical aéré.
 
-Structure JSON STRICTE attendue (ne renvoie rien d'autre que ce JSON) :
+RÈGLE D'EXHAUSTIVITÉ DES EXERCICES :
+- Tu DOIS inclure ABSOLUMENT TOUTES LES PHRASES d'exercices présentes dans le document, de la première à la toute dernière.
+- Chaque phrase à trous doit être ENTIÈRE, conservée du premier mot jusqu'au point final, avec ses trous "____".
+
+Structure JSON STRICTE à respecter :
 {
-  "titre": "Titre de la leçon",
-  "points_importants": {
-    "fr": ["Point clé 1...", "Point clé 2..."],
-    "en": ["Key point 1...", "Key point 2..."],
-    "ko": ["핵심 포인트 1...", "핵심 포인트 2..."]
-  },
+  "titre": "Titre exact de la leçon",
   "bloc_cours": {
     "titre": "Cours théorique",
     "slides": [
       {
         "numero": 1,
         "titre": "Titre de la section",
-        "contenu_fr": "Explications en français...",
-        "contenu_en": "Explanations in English...",
-        "contenu_ko": "한국어 설명..."
+        "contenu_fr": "Première phrase de cours explicative.\\n\\nDeuxième phrase avec une règle précise.\\n\\nExemple : Je vais manger une pomme.\\n\\nAutre exemple : Nous allons partir bientôt.",
+        "contenu_en": "First explanatory sentence.\\n\\nSecond sentence detailing the rule.\\n\\nExample: I am going to eat an apple.\\n\\nAnother example: We are leaving soon.",
+        "contenu_ko": "첫 번째 문법 설명 문장입니다.\\n\\n두 번째 구체적인 규칙 설명 문장입니다.\\n\\n예문: Je vais manger une pomme.\\n\\n다른 예문: Nous allons partir bientôt."
       }
     ]
+  },
+  "points_importants": {
+    "fr": ["Point clé 1...", "Point clé 2..."],
+    "en": ["Key point 1...", "Key point 2..."],
+    "ko": ["핵심 포인트 1...", "핵심 포인트 2..."]
   },
   "quiz_theorique": {
     "titre": "Quiz de vérification du cours",
@@ -151,17 +156,24 @@ Structure JSON STRICTE attendue (ne renvoie rien d'autre que ce JSON) :
   "blocs_exercices": [
     {
       "id": "exo_1",
-      "titre": "Exercice d'application",
-      "consigne": "Complétez les phrases.",
+      "titre": "Titre de l'exercice 1",
+      "consigne": "Consigne complète",
       "questions": [
-        { "q": "Phrase modèle avec ____ pour le mot à trouver." }
+        { "q": "TOUTES les phrases de l'exercice 1 sans en omettre une seule avec ____." }
+      ]
+    },
+    {
+      "id": "exo_2",
+      "titre": "Titre de l'exercice 2",
+      "consigne": "Consigne complète",
+      "questions": [
+        { "q": "TOUTES les phrases de l'exercice 2 sans en omettre une seule avec ____." }
       ]
     }
   ]
 }
 `;
 
-        // SI GEMINI
         if (modelChoisi.startsWith("gemini")) {
             const apiKey = obtenirCleGemini(req);
             if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
@@ -171,7 +183,6 @@ Structure JSON STRICTE attendue (ne renvoie rien d'autre que ce JSON) :
             return res.json(resultat);
         }
 
-        // SI NANOGPT (QWEN OU DEEPSEEK - STRICTEMENT LE MODÈLE DEMANDÉ)
         const apiKeyNano = obtenirCleNanoGPT(req);
         if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente. Veuillez la renseigner." });
 
@@ -185,8 +196,14 @@ Structure JSON STRICTE attendue (ne renvoie rien d'autre que ce JSON) :
         }
 
         const messages = [
-            { role: "system", content: "Tu es un professeur de français FLE. Réponds STRICTEMENT au format JSON demandé sans aucun commentaire." },
-            { role: "user", content: `${promptStructure}\n\n[CONTENU DU DOCUMENT PDF] :\n${texteExtrait}` }
+            { 
+                role: "system", 
+                content: "Tu es un professeur de FLE rigoureux. Dans les fiches de cours, tu mets impérativement un double saut de ligne (\\n\\n) après chaque phrase. Tu réponds STRICTEMENT au format JSON." 
+            },
+            { 
+                role: "user", 
+                content: `${promptStructure}\n\n[CONTENU DU DOCUMENT PDF SOURCE] :\n${texteExtrait}` 
+            }
         ];
 
         const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
@@ -202,7 +219,7 @@ Structure JSON STRICTE attendue (ne renvoie rien d'autre que ce JSON) :
 app.post('/api/ajuster-contenu', async (req, res) => {
     try {
         const { contenuActuel, instruction } = req.body;
-        const modelChoisi = req.headers['x-model-choice'] || 'qwen/qwen3-235b-a22b-thinking-2507';
+        const modelChoisi = req.headers['x-model-choice'] || 'deepseek/deepseek-v4.1-flash:thinking';
 
         const prompt = `
 Tu es un professeur de FLE. Voici le cours actuel en JSON :
@@ -211,7 +228,10 @@ ${JSON.stringify(contenuActuel, null, 2)}
 INSTRUCTION DU PROFESSEUR :
 "${instruction}"
 
-Applique les changements et renvoie STRICTEMENT le JSON complet mis à jour (conserve points_importants en 3 langues, quiz_theorique en 3 langues, bloc_cours et blocs_exercices) :
+RÈGLES :
+1. Dans chaque fiche de cours, sépare CHAQUE phrase par un double saut de ligne (\\n\\n).
+2. Conserve impérativement TOUTES les phrases des exercices.
+Renvoie STRICTEMENT le JSON complet mis à jour :
 `;
 
         if (modelChoisi.startsWith("gemini")) {
@@ -226,7 +246,7 @@ Applique les changements et renvoie STRICTEMENT le JSON complet mis à jour (con
         if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
 
         const messages = [
-            { role: "system", content: "Réponds STRICTEMENT en JSON." },
+            { role: "system", content: "Réponds STRICTEMENT en JSON en respectant les sauts de ligne entre chaque phrase." },
             { role: "user", content: prompt }
         ];
 
