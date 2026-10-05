@@ -1,7 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const pdfParse = require('pdf-parse');
+
+let pdfParse = require('pdf-parse');
+if (typeof pdfParse !== 'function' && pdfParse.default) {
+    pdfParse = pdfParse.default;
+}
 
 const app = express();
 app.use(cors());
@@ -20,8 +24,6 @@ function obtenirCleNanoGPT(req) {
     if (cleHeader && cleHeader.trim()) return cleHeader.trim();
     return process.env.NANOGPT_API_KEY;
 }
-
-const attendre = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- MOTEUR 1 : APPEL GOOGLE GEMINI ---
 async function appelerGemini(contents, model, apiKey) {
@@ -69,7 +71,6 @@ async function appelerNanoGPT(messages, model, apiKey) {
     if (data.choices && data.choices[0].message && data.choices[0].message.content) {
         let texte = data.choices[0].message.content;
         texte = texte.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-        // Extraction du JSON au cas où le modèle ajoute du texte autour
         const match = texte.match(/\{[\s\S]*\}/);
         if (match) return JSON.parse(match[0]);
         return JSON.parse(texte);
@@ -77,7 +78,7 @@ async function appelerNanoGPT(messages, model, apiKey) {
     throw new Error("Réponse NanoGPT vide ou non analysable.");
 }
 
-// 1. ENDPOINT ANALYSE PDF (CHOIX DU MODÈLE : GEMINI OU NANOGPT)
+// 1. ENDPOINT ANALYSE PDF (GEMINI OU NANOGPT)
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
@@ -163,9 +164,16 @@ Structure JSON STRICTE attendue :
         const apiKeyNano = obtenirCleNanoGPT(req);
         if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente. Veuillez la renseigner." });
 
-        // Extraction du texte du PDF
-        const donneesPdf = await pdfParse(req.file.buffer);
-        const texteExtrait = donneesPdf.text || "";
+        // Extraction sécurisée du texte PDF (gère fonction directe ou objet exporté)
+        let texteExtrait = "";
+        try {
+            const fnParser = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
+            const donneesPdf = await fnParser(req.file.buffer);
+            texteExtrait = (donneesPdf && donneesPdf.text) ? donneesPdf.text : "";
+        } catch(eParser) {
+            console.error("Erreur parser PDF :", eParser);
+            throw new Error("Impossible d'extraire le texte du PDF : " + eParser.message);
+        }
 
         const messages = [
             { role: "system", content: "Tu es un professeur de français FLE. Réponds TOUJOURS au format JSON strict." },
@@ -282,7 +290,6 @@ Structure JSON :
 }
 `;
         const contents = [{ parts: [{ text: prompt }] }];
-        // Emma tourne sur Flash Lite
         const modeles = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
         let resJson = null;
         for (const m of modeles) {
