@@ -25,29 +25,96 @@ function obtenirCleNanoGPT(req) {
     return process.env.NANOGPT_API_KEY;
 }
 
-// NETTOYEUR ET RÉPARATEUR DE JSON STRICT
-function reparerEtParserJSON(texteBrut) {
+// =========================================================================
+// PARSEUR ET RÉPARATEUR DE JSON TOLÉRANT (GÈRE LES VRAIS SAUTS DE LIGNE)
+// =========================================================================
+function parserJSONSansErreur(texteBrut) {
     let t = texteBrut;
+
+    // 1. Éliminer complètement la réflexion de DeepSeek
     t = t.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+    // 2. Éliminer les blocs markdown
     t = t.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
 
-    const premier = t.indexOf('{');
-    const dernier = t.lastIndexOf('}');
-    if (premier !== -1 && dernier !== -1) {
-        t = t.substring(premier, dernier + 1);
+    // 3. Isoler l'objet JSON entre la toute première accolade et la toute dernière
+    const premierIndex = t.indexOf('{');
+    const dernierIndex = t.lastIndexOf('}');
+    if (premierIndex === -1 || dernierIndex === -1) {
+        throw new Error("Aucun objet JSON valide n'a été détecté dans la réponse.");
     }
+    t = t.substring(premierIndex, dernierIndex + 1);
 
+    // 4. Premier essai normal
     try {
         return JSON.parse(t);
-    } catch (err) {
-        // En cas de coupure ou guillemet non fermé
-        console.error("Erreur parsing JSON brut :", err.message);
-        throw new Error("L'IA a produit une réponse JSON incomplète ou mal formée : " + err.message);
+    } catch (errOriginal) {
+        // Si le parseur échoue (très souvent à cause d'un saut de ligne non échappé dans une chaîne),
+        // on parcourt la chaîne pour échapper proprement les retours à la ligne entre guillemets.
+        try {
+            let resultat = "";
+            let dansChaine = false;
+            let caractereEchappement = false;
+
+            for (let i = 0; i < t.length; i++) {
+                const char = t[i];
+
+                if (char === '"' && !caractereEchappement) {
+                    dansChaine = !dansChaine;
+                    resultat += char;
+                } else if (caractereEchappement) {
+                    resultat += char;
+                    caractereEchappement = false;
+                } else if (char === '\\') {
+                    resultat += char;
+                    caractereEchappement = true;
+                } else if (dansChaine && char === '\n') {
+                    resultat += '\\n';
+                } else if (dansChaine && char === '\r') {
+                    // Ignorer les retours chariot Windows
+                } else if (dansChaine && char === '\t') {
+                    resultat += '\\t';
+                } else {
+                    resultat += char;
+                }
+            }
+
+            return JSON.parse(resultat);
+
+        } catch (errReparation) {
+            console.error("Échec définitif du parseur JSON :", errReparation.message);
+            console.error("Extrait où l'erreur s'est produite :", t.slice(Math.max(0, errOriginal.message.match(/position (\d+)/) ? parseInt(errOriginal.message.match(/position (\d+)/)[1]) - 100 : 0), 300));
+            throw new Error(`Erreur de syntaxe JSON : ${errOriginal.message}`);
+        }
     }
 }
 
-// APPEL STABLE NANOGPT
-async function appelerNanoGPT(messages, model, apiKey) {
+// --- APPEL GOOGLE GEMINI ---
+async function appelerGeminiStrict(contents, model, apiKey) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            contents: contents,
+            generationConfig: { 
+                responseMimeType: "application/json",
+                maxOutputTokens: 32000
+            }
+        })
+    });
+
+    const data = await response.json();
+    if (data.error) throw new Error(`[Gemini] ${data.error.message || JSON.stringify(data.error)}`);
+
+    if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts[0].text) {
+        return parserJSONSansErreur(data.candidates[0].content.parts[0].text);
+    }
+    throw new Error("Réponse vide reçue de Gemini.");
+}
+
+// --- APPEL NANOGPT (SANS BRIDAGE - PLEINE PUISSANCE DEEPSEEK & QWEN) ---
+async function appelerNanoGPTStrict(messages, model, apiKey) {
     if (!apiKey) throw new Error("Clé API NanoGPT manquante.");
 
     const response = await fetch("https://nano-gpt.com/api/v1/chat/completions", {
@@ -60,8 +127,8 @@ async function appelerNanoGPT(messages, model, apiKey) {
         body: JSON.stringify({
             model: model,
             messages: messages,
-            temperature: 0.1,
-            max_tokens: 8192
+            temperature: 0.2,
+            max_tokens: 64000 // Plafond très haut pour laisser DeepSeek réfléchir et tout rédiger
         })
     });
 
@@ -69,56 +136,31 @@ async function appelerNanoGPT(messages, model, apiKey) {
     if (data.error) throw new Error(`[NanoGPT - ${model}] ${data.error.message || JSON.stringify(data.error)}`);
 
     if (data.choices && data.choices[0] && data.choices[0].message) {
-        return reparerEtParserJSON(data.choices[0].message.content || "");
+        const contenu = data.choices[0].message.content || "";
+        return parserJSONSansErreur(contenu);
     }
     throw new Error(`Aucune réponse exploitable renvoyée par ${model}.`);
 }
 
-// APPEL GEMINI
-async function appelerGemini(contents, model, apiKey) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            contents: contents,
-            generationConfig: { responseMimeType: "application/json", maxOutputTokens: 8192 }
-        })
-    });
-
-    const data = await response.json();
-    if (data.error) throw new Error(`[Gemini] ${data.error.message || JSON.stringify(data.error)}`);
-
-    if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts[0].text) {
-        return reparerEtParserJSON(data.candidates[0].content.parts[0].text);
-    }
-    throw new Error("Réponse vide reçue de Gemini.");
-}
-
-// 1. ENDPOINT ANALYSE PDF (PIPELINE EN 2 ÉTAPES : ZÉRO DÉPASSEMENT DE TAILLE)
+// 1. ENDPOINT ANALYSE PDF (COURS AÉRÉ + TOUTES LES PHRASES EN UNE SEULE FOIS)
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
 
         const modelChoisi = req.headers['x-model-choice'] || 'deepseek/deepseek-v4.1-flash:thinking';
-        const apiKeyNano = obtenirCleNanoGPT(req);
-        const apiKeyGemini = obtenirCleGemini(req);
+        
+        const promptStructure = `
+Tu es un professeur expert de Français Langue Étrangère (FLE). Analyse ce document pédagogique et structure-le rigoureusement.
 
-        // Extraction texte du PDF
-        let texteExtrait = "";
-        try {
-            const fnParser = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
-            const donneesPdf = await fnParser(req.file.buffer);
-            texteExtrait = (donneesPdf && donneesPdf.text) ? donneesPdf.text : "";
-        } catch(eParser) {
-            throw new Error("Impossible de lire le texte du PDF : " + eParser.message);
-        }
+RÈGLE DE MISE EN PAGE DU COURS (AÉRATION OBLIGATOIRE) :
+- Dans chaque slide de cours (dans "contenu_fr", "contenu_en" et "contenu_ko"), mets un double saut de ligne après chaque phrase ou exemple pour aérer la lecture.
+- Chaque phrase ou exemple doit être clairement séparé.
 
-        // --- ÉTAPE 1 : THÉORIE (COURS, POINTS CLÉS & QUIZ) ---
-        const promptTheorie = `
-Tu es un professeur de FLE. Analyse ce document et génère EXCLUSIVEMENT la partie théorique (Cours aéré avec une phrase par ligne, points importants en 3 langues, quiz théorique en 3 langues).
+RÈGLE D'EXHAUSTIVITÉ DES EXERCICES (NON NÉGOCIABLE) :
+- Tu DOIS inclure ABSOLUMENT TOUTES LES PHRASES d'exercices présentes dans le document, de la première à la toute dernière, sans jamais en omettre une seule.
+- Chaque phrase à trous doit être ENTIÈRE, conservée du premier mot jusqu'au point final, avec ses trous "____".
 
-Structure JSON STRICTE :
+Structure JSON attendue :
 {
   "titre": "Titre exact de la leçon",
   "bloc_cours": {
@@ -126,10 +168,10 @@ Structure JSON STRICTE :
     "slides": [
       {
         "numero": 1,
-        "titre": "Titre section",
-        "phrases_fr": ["Phrase 1...", "Phrase 2...", "Exemple : ..."],
-        "phrases_en": ["Sentence 1...", "Sentence 2...", "Example: ..."],
-        "phrases_ko": ["설명 1...", "설명 2...", "예문: ..."]
+        "titre": "Titre de la section",
+        "contenu_fr": "Première phrase explicative.\\n\\nDeuxième phrase avec une règle précise.\\n\\nExemple : Je vais manger une pomme.\\n\\nAutre exemple : Nous allons partir bientôt.",
+        "contenu_en": "First explanatory sentence.\\n\\nSecond sentence detailing the rule.\\n\\nExample: I am going to eat an apple.\\n\\nAnother example: We are leaving soon.",
+        "contenu_ko": "첫 번째 설명 문장입니다.\\n\\n두 번째 구체적인 문법 규칙 설명입니다.\\n\\n예문: Je vais manger une pomme.\\n\\n다른 예문: Nous allons partir bientôt."
       }
     ]
   },
@@ -143,91 +185,82 @@ Structure JSON STRICTE :
     "questions": [
       {
         "id": 1,
-        "question": { "fr": "Question FR ?", "en": "Question EN ?", "ko": "질문 KO ?" },
-        "options": { "fr": ["A", "B", "C"], "en": ["A", "B", "C"], "ko": ["A", "B", "C"] },
+        "question": {
+          "fr": "Question sur la règle en français ?",
+          "en": "Question in English ?",
+          "ko": "한국어 질문 ?"
+        },
+        "options": {
+          "fr": ["Option A", "Option B", "Option C"],
+          "en": ["Option A", "Option B", "Option C"],
+          "ko": ["보기 A", "보기 B", "보기 C"]
+        },
         "reponse_correcte_index": 0,
-        "explication": { "fr": "Explication...", "en": "Explanation...", "ko": "해설..." }
+        "explication": {
+          "fr": "Explication...",
+          "en": "Explanation...",
+          "ko": "정답 해설..."
+        }
       }
     ]
-  }
-}
-`;
-
-        // --- ÉTAPE 2 : EXERCICES COMPLETS (100% DES PHRASES) ---
-        const promptExercices = `
-Tu es un professeur de FLE. Analyse ce document et extrais ABSOLUMENT TOUTES LES PHRASES d'exercices présentes dans le texte, de la première à la toute dernière, sans jamais en omettre une seule.
-Chaque phrase doit comporter ses trous "____".
-
-Structure JSON STRICTE :
-{
+  },
   "blocs_exercices": [
     {
       "id": "exo_1",
-      "titre": "Exercice 1",
+      "titre": "Titre de l'exercice 1",
       "consigne": "Consigne complète",
       "questions": [
-        { "q": "Phrase complète 1 avec ____." },
-        { "q": "Phrase complète 2 avec ____." }
+        { "q": "TOUTES les phrases de l'exercice 1 avec ses trous ____." }
       ]
     },
     {
       "id": "exo_2",
-      "titre": "Exercice 2",
+      "titre": "Titre de l'exercice 2",
       "consigne": "Consigne complète",
       "questions": [
-        { "q": "Phrase complète avec ____." }
+        { "q": "TOUTES les phrases de l'exercice 2 avec ses trous ____." }
       ]
     }
   ]
 }
 `;
 
-        let theorieJson = null;
-        let exercicesJson = null;
-
+        // SI GEMINI NATIVE
         if (modelChoisi.startsWith("gemini")) {
+            const apiKeyGemini = obtenirCleGemini(req);
             if (!apiKeyGemini) return res.status(500).json({ error: "Clé Gemini absente." });
             const pdfBase64 = req.file.buffer.toString('base64');
-            const contents1 = [{ parts: [{ text: promptTheorie }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
-            const contents2 = [{ parts: [{ text: promptExercices }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
-            theorieJson = await appelerGemini(contents1, modelChoisi, apiKeyGemini);
-            exercicesJson = await appelerGemini(contents2, modelChoisi, apiKeyGemini);
-        } else {
-            if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
-            
-            const msg1 = [
-                { role: "system", content: "Réponds UNIQUEMENT en JSON strict." },
-                { role: "user", content: `${promptTheorie}\n\n[TEXTE DU PDF] :\n${texteExtrait}` }
-            ];
-            const msg2 = [
-                { role: "system", content: "Extrais 100% des phrases d'exercices. Réponds UNIQUEMENT en JSON strict." },
-                { role: "user", content: `${promptExercices}\n\n[TEXTE DU PDF] :\n${texteExtrait}` }
-            ];
-
-            // Exécution des deux parties
-            theorieJson = await appelerNanoGPT(msg1, modelChoisi, apiKeyNano);
-            exercicesJson = await appelerNanoGPT(msg2, modelChoisi, apiKeyNano);
+            const contents = [{ parts: [{ text: promptStructure }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
+            const resultat = await appelerGeminiStrict(contents, modelChoisi, apiKeyGemini);
+            return res.json(resultat);
         }
 
-        // Assemblage final parfait
-        const resultatFinal = {
-            titre: theorieJson.titre || "Chapitre de cours",
-            bloc_cours: theorieJson.bloc_cours || null,
-            points_importants: theorieJson.points_importants || null,
-            quiz_theorique: theorieJson.quiz_theorique || null,
-            blocs_exercices: (exercicesJson && exercicesJson.blocs_exercices) ? exercicesJson.blocs_exercices : []
-        };
+        // SI NANOGPT (DEEPSEEK OU QWEN)
+        const apiKeyNano = obtenirCleNanoGPT(req);
+        if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente. Veuillez la renseigner." });
 
-        // Formatage avec double saut de ligne
-        if (resultatFinal.bloc_cours && Array.isArray(resultatFinal.bloc_cours.slides)) {
-            resultatFinal.bloc_cours.slides.forEach(s => {
-                if (Array.isArray(s.phrases_fr)) s.contenu_fr = s.phrases_fr.join("\n\n");
-                if (Array.isArray(s.phrases_en)) s.contenu_en = s.phrases_en.join("\n\n");
-                if (Array.isArray(s.phrases_ko)) s.contenu_ko = s.phrases_ko.join("\n\n");
-            });
+        let texteExtrait = "";
+        try {
+            const fnParser = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
+            const donneesPdf = await fnParser(req.file.buffer);
+            texteExtrait = (donneesPdf && donneesPdf.text) ? donneesPdf.text : "";
+        } catch(eParser) {
+            throw new Error("Impossible de lire le texte du PDF : " + eParser.message);
         }
 
-        res.json(resultatFinal);
+        const messages = [
+            { 
+                role: "system", 
+                content: "Tu es un professeur de FLE expert. Tu rédiges les cours en aérant chaque phrase par un double saut de ligne et tu extrais 100% de toutes les phrases d'exercices. Tu réponds au format JSON." 
+            },
+            { 
+                role: "user", 
+                content: `${promptStructure}\n\n[DOCUMENT PDF SOURCE] :\n${texteExtrait}` 
+            }
+        ];
+
+        const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
+        res.json(resultat);
 
     } catch (err) {
         console.error("Erreur analyser-pdf :", err);
@@ -248,30 +281,30 @@ ${JSON.stringify(contenuActuel, null, 2)}
 INSTRUCTION DU PROFESSEUR :
 "${instruction}"
 
-RÈGLE : Conserve impérativement TOUTES les phrases des exercices.
+RÈGLES :
+1. Dans chaque fiche de cours, sépare CHAQUE phrase par un double saut de ligne.
+2. Conserve impérativement TOUTES les phrases des exercices.
 Renvoie STRICTEMENT le JSON complet mis à jour :
 `;
-
-        let resultatJson = null;
 
         if (modelChoisi.startsWith("gemini")) {
             const apiKey = obtenirCleGemini(req);
             if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
             const contents = [{ parts: [{ text: prompt }] }];
-            resultatJson = await appelerGemini(contents, modelChoisi, apiKey);
-        } else {
-            const apiKeyNano = obtenirCleNanoGPT(req);
-            if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
-
-            const messages = [
-                { role: "system", content: "Réponds STRICTEMENT en JSON sans fioritures." },
-                { role: "user", content: prompt }
-            ];
-
-            resultatJson = await appelerNanoGPT(messages, modelChoisi, apiKeyNano);
+            const resultat = await appelerGeminiStrict(contents, modelChoisi, apiKey);
+            return res.json(resultat);
         }
 
-        res.json(resultatJson);
+        const apiKeyNano = obtenirCleNanoGPT(req);
+        if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
+
+        const messages = [
+            { role: "system", content: "Réponds STRICTEMENT en JSON." },
+            { role: "user", content: prompt }
+        ];
+
+        const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
+        res.json(resultat);
 
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -343,7 +376,7 @@ Structure JSON :
         let resJson = null;
         for (const m of modeles) {
             try {
-                resJson = await appelerGemini(contents, m, apiKey);
+                resJson = await appelerGeminiStrict(contents, m, apiKey);
                 if (resJson) break;
             } catch(e) {}
         }
@@ -388,7 +421,7 @@ Structure JSON :
         let resJson = null;
         for (const m of modeles) {
             try {
-                resJson = await appelerGemini(contents, m, apiKey);
+                resJson = await appelerGeminiStrict(contents, m, apiKey);
                 if (resJson) break;
             } catch(e) {}
         }
