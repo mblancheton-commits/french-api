@@ -123,7 +123,7 @@ async function appelerNanoGPTStrict(messages, model, apiKey) {
     throw new Error(`Aucune réponse exploitable renvoyée par ${model}.`);
 }
 
-// 1. ENDPOINT ANALYSE PDF (SUPPORT NÉGOCIÉ TROUS ET RÉPONSES LIBRES)
+// 1. ENDPOINT ANALYSE PDF
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: "Aucun fichier PDF reçu." });
@@ -136,11 +136,11 @@ Tu es un professeur expert de Français Langue Étrangère (FLE). Analyse ce doc
 RÈGLE DU COURS AÉRÉ :
 - Dans chaque slide de cours (dans "contenu_fr", "contenu_en" et "contenu_ko"), mets un double saut de ligne (\\n\\n) après chaque phrase ou exemple pour aérer la lecture.
 
-RÈGLE D'EXHAUSTIVITÉ DES EXERCICES (IMPORTANT) :
+RÈGLE D'EXHAUSTIVITÉ DES EXERCICES :
 - Tu DOIS inclure ABSOLUMENT TOUTES LES QUESTIONS OU PHRASES du document, de la première à la toute dernière sans exception.
 - DÉTECTION DU FORMAT D'EXERCICE :
-  * Si l'exercice est à trous : conserve la phrase entière avec ses trous "____". Définis "type": "trous".
-  * Si l'exercice est composé de questions ouvertes / réponses libres (ex: "Tu es arrivé(e) quand ?") : conserve l'intitulé exact de la question et définis "type": "libre".
+  * Si l'exercice est à trous : conserve la phrase entière avec ses trous "____".
+  * Si l'exercice est composé de questions ouvertes / réponses libres (ex: "Tu es arrivé(e) quand ?") : conserve l'intitulé exact de la question.
 
 Structure JSON STRICTE à renvoyer :
 {
@@ -191,7 +191,6 @@ Structure JSON STRICTE à renvoyer :
       "id": "exo_1",
       "titre": "Titre de l'exercice",
       "consigne": "Consigne complète",
-      "type": "trous ou libre",
       "questions": [
         { "q": "Intitulé de la question ou phrase avec ____" }
       ]
@@ -224,7 +223,7 @@ Structure JSON STRICTE à renvoyer :
         const messages = [
             { 
                 role: "system", 
-                content: "Tu es un professeur de FLE expert. Tu inclus 100% de toutes les questions du PDF sans exception. Tu distingues les exercices 'trous' et les questions ouvertes 'libre'. Réponds en JSON strict." 
+                content: "Tu es un professeur de FLE expert. Tu inclus 100% de toutes les questions du PDF sans exception. Réponds en JSON strict." 
             },
             { 
                 role: "user", 
@@ -284,7 +283,7 @@ Renvoie STRICTEMENT le JSON complet mis à jour :
     }
 });
 
-// 3. ENDPOINT EMMA (FLASH LITE)
+// 3. ENDPOINT EMMA (TRADUCTION EN CORÉEN PAR DÉFAUT SI INTERFACE EN FRANÇAIS)
 app.post('/api/corriger-emma', async (req, res) => {
     try {
         const apiKey = obtenirCleGemini(req);
@@ -293,24 +292,27 @@ app.post('/api/corriger-emma', async (req, res) => {
         const { question, reponseEleve, langue } = req.body;
         const langCode = (langue || 'fr').toLowerCase();
 
-        let consigneLangue = "Donne toutes tes explications grammaticales en Français.";
-        let nomLangue = "français";
-        if (langCode === 'ko') {
-            consigneLangue = "Rédige TOUTES les explications pédagogiques (ce qui est bien, fautes, améliorations) en CORÉEN (한국어). Traduis aussi la réponse amicale et la phrase corrigée en coréen.";
+        let consigneLangue = "";
+        let nomLangue = "";
+
+        // MODIFICATION : Si l'interface est en français, on traduit quand même la réponse d'Emma en Coréen !
+        if (langCode === 'ko' || langCode === 'fr') {
+            consigneLangue = "Rédige la réponse amicale d'Emma en français simple (A2-B1). Dans 'traduction_reponse' et 'traduction_phrase_corrigee', traduis impérativement en CORÉEN (한국어). " + 
+                (langCode === 'fr' ? "Rédige les explications pédagogiques (ce qui est bien, fautes, améliorations) en Français." : "Rédige les explications pédagogiques en Coréen (한국어).");
             nomLangue = "coréen";
         } else if (langCode === 'en') {
-            consigneLangue = "Rédige TOUTES les explications pédagogiques (ce qui est bien, fautes, améliorations) en ANGLAIS. Traduis aussi la réponse amicale et la phrase corrigée en anglais.";
+            consigneLangue = "Rédige les explications pédagogiques en Anglais. Dans 'traduction_reponse' et 'traduction_phrase_corrigee', traduis impérativement en ANGLAIS.";
             nomLangue = "anglais";
         }
 
         if (!reponseEleve || !reponseEleve.trim()) {
             return res.json({
                 reponse_amicale: "Tu n'as rien écrit ! N'aie pas peur d'essayer. 😊",
-                traduction_reponse: langCode === 'ko' ? "아무것도 쓰지 않았어요! 두려워하지 말고 시도해 보세요. 😊" : (langCode === 'en' ? "You wrote nothing! Don't be afraid to try. 😊" : ""),
+                traduction_reponse: (langCode === 'en' ? "You wrote nothing! Don't be afraid to try. 😊" : "아무것도 쓰지 않았어요! 두려워하지 말고 시도해 보세요. 😊"),
                 ce_qui_est_bien: langCode === 'ko' ? "아직 없음." : "Rien pour l'instant.",
                 les_fautes: langCode === 'ko' ? "답변이 비어 있습니다." : "La réponse est vide.",
                 phrase_corrigee: "Écris une phrase complète.",
-                traduction_phrase_corrigee: langCode === 'ko' ? "완전한 문장을 작성하세요." : (langCode === 'en' ? "Write a full sentence." : ""),
+                traduction_phrase_corrigee: (langCode === 'en' ? "Write a full sentence." : "완전한 문장을 작성하세요."),
                 ameliorations: langCode === 'ko' ? "직접 작성해 보세요!" : "Lance-toi !"
             });
         }
@@ -319,28 +321,27 @@ app.post('/api/corriger-emma', async (req, res) => {
 Tu es Emma, une amie française bienveillante (A2-B1).
 Question posée : "${question}"
 Phrase écrite par l'élève : "${reponseEleve}"
-Langue cible pour les explications de l'élève : ${nomLangue}.
 
-[INSTRUCTIONS DE LANGUE]
+[RÈGLES DE LANGUE ET TRADUCTION]
 ${consigneLangue}
-- La réponse amicale d'Emma doit TOUJOURS être en Français naturel et simple (A2-B1).
-- Si la langue n'est pas le français, donne la traduction de cette réponse dans "traduction_reponse".
-- Donne la traduction de la phrase corrigée dans "traduction_phrase_corrigee".
+- "reponse_amicale" doit être en français naturel et amical.
+- "traduction_reponse" doit contenir la traduction de cette réponse en ${nomLangue}.
+- "traduction_phrase_corrigee" doit contenir la traduction de la phrase corrigée en ${nomLangue}.
 
-[ANTI-HALLUCINATION]
+[ANTI-HALLUCINATION STRICTE]
 1. Regarde VRAIMENT la phrase de l'élève.
 2. Si majuscule présente -> INTERDICTION de dire qu'elle manque.
 3. Si point (.) présent -> INTERDICTION de dire qu'il manque.
-4. Corrige uniquement les vraies fautes.
+4. Ne corrige que les vraies fautes réelles.
 
 Structure JSON :
 {
   "reponse_amicale": "...",
-  "traduction_reponse": "...",
+  "traduction_reponse": "Traduction en ${nomLangue}...",
   "ce_qui_est_bien": "...",
   "les_fautes": "...",
   "phrase_corrigee": "...",
-  "traduction_phrase_corrigee": "...",
+  "traduction_phrase_corrigee": "Traduction en ${nomLangue}...",
   "ameliorations": "..."
 }
 `;
