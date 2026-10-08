@@ -179,4 +179,238 @@ Structure JSON STRICTE à renvoyer :
         },
         "reponse_correcte_index": 0,
         "explication": {
-          "fr": "Explication..
+          "fr": "Explication...",
+          "en": "Explanation...",
+          "ko": "정답 해설..."
+        }
+      }
+    ]
+  },
+  "blocs_exercices": [
+    {
+      "id": "exo_1",
+      "titre": "Titre de l'exercice",
+      "consigne": "Consigne complète",
+      "questions": [
+        { "q": "Intitulé de la question ou phrase avec ____" }
+      ]
+    }
+  ]
+}
+`;
+
+        if (modelChoisi.startsWith("gemini")) {
+            const apiKeyGemini = obtenirCleGemini(req);
+            if (!apiKeyGemini) return res.status(500).json({ error: "Clé Gemini absente." });
+            const pdfBase64 = req.file.buffer.toString('base64');
+            const contents = [{ parts: [{ text: promptStructure }, { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }] }];
+            const resultat = await appelerGeminiStrict(contents, modelChoisi, apiKeyGemini);
+            return res.json(resultat);
+        }
+
+        const apiKeyNano = obtenirCleNanoGPT(req);
+        if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente. Veuillez la renseigner." });
+
+        let texteExtrait = "";
+        try {
+            const fnParser = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
+            const donneesPdf = await fnParser(req.file.buffer);
+            texteExtrait = (donneesPdf && donneesPdf.text) ? donneesPdf.text : "";
+        } catch(eParser) {
+            throw new Error("Impossible de lire le texte du PDF : " + eParser.message);
+        }
+
+        const messages = [
+            { 
+                role: "system", 
+                content: "Tu es un professeur de FLE expert. Tu inclus 100% de toutes les questions du PDF sans exception. Réponds en JSON strict." 
+            },
+            { 
+                role: "user", 
+                content: `${promptStructure}\n\n[DOCUMENT PDF SOURCE] :\n${texteExtrait}` 
+            }
+        ];
+
+        const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
+        res.json(resultat);
+
+    } catch (err) {
+        console.error("Erreur analyser-pdf :", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 2. ENDPOINT AJUSTEMENT CONTENU
+app.post('/api/ajuster-contenu', async (req, res) => {
+    try {
+        const { contenuActuel, instruction } = req.body;
+        const modelChoisi = req.headers['x-model-choice'] || 'deepseek/deepseek-v4.1-flash:thinking';
+
+        const prompt = `
+Tu es un professeur de FLE. Voici le cours actuel en JSON :
+${JSON.stringify(contenuActuel, null, 2)}
+
+INSTRUCTION DU PROFESSEUR :
+"${instruction}"
+
+RÈGLES :
+1. Dans chaque fiche de cours, sépare CHAQUE phrase par un double saut de ligne.
+2. Conserve impérativement TOUTES les questions ou phrases des exercices.
+Renvoie STRICTEMENT le JSON complet mis à jour :
+`;
+
+        if (modelChoisi.startsWith("gemini")) {
+            const apiKey = obtenirCleGemini(req);
+            if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
+            const contents = [{ parts: [{ text: prompt }] }];
+            const resultat = await appelerGeminiStrict(contents, modelChoisi, apiKey);
+            return res.json(resultat);
+        }
+
+        const apiKeyNano = obtenirCleNanoGPT(req);
+        if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
+
+        const messages = [
+            { role: "system", content: "Réponds STRICTEMENT en JSON." },
+            { role: "user", content: prompt }
+        ];
+
+        const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
+        res.json(resultat);
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 3. ENDPOINT EMMA (RÈGLES LINGUISTIQUES STRICTES PAR LANGUE D'INTERFACE)
+app.post('/api/corriger-emma', async (req, res) => {
+    try {
+        const apiKey = obtenirCleGemini(req);
+        if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
+
+        const { question, reponseEleve, langue } = req.body;
+        const langCode = (langue || 'fr').toLowerCase();
+
+        let consigneExplications = "";
+        let langueTraduction = "";
+
+        if (langCode === 'ko') {
+            // INTERFACE CORÉENNE : TOUT LE COIN DU PROF DOIT ÊTRE EN CORÉEN
+            consigneExplications = "Rédige IMPÉRATIVEMENT TOUTES les explications pédagogiques ('ce_qui_est_bien', 'les_fautes', 'ameliorations') en CORÉEN (한국어).";
+            langueTraduction = "coréen (한국어)";
+        } else if (langCode === 'en') {
+            // INTERFACE ANGLAISE : EXPLICATIONS EN ANGLAIS
+            consigneExplications = "Rédige IMPÉRATIVEMENT TOUTES les explications pédagogiques ('ce_qui_est_bien', 'les_fautes', 'ameliorations') en ANGLAIS.";
+            langueTraduction = "anglais";
+        } else {
+            // INTERFACE FRANÇAISE : EXPLICATIONS EN FRANÇAIS, TRADUCTION DE LA RÉPONSE ET DU CORRIGÉ EN CORÉEN
+            consigneExplications = "Rédige les explications pédagogiques ('ce_qui_est_bien', 'les_fautes', 'ameliorations') en FRANÇAIS.";
+            langueTraduction = "coréen (한국어)";
+        }
+
+        if (!reponseEleve || !reponseEleve.trim()) {
+            return res.json({
+                reponse_amicale: "Tu n'as rien écrit ! N'aie pas peur d'essayer. 😊",
+                traduction_reponse: (langCode === 'en' ? "You wrote nothing! Don't be afraid to try. 😊" : "아무것도 쓰지 않았어요! 두려워하지 말고 시도해 보세요. 😊"),
+                ce_qui_est_bien: langCode === 'ko' ? "아직 없음." : "Rien pour l'instant.",
+                les_fautes: langCode === 'ko' ? "답변이 비어 있습니다." : "La réponse est vide.",
+                phrase_corrigee: "Écris une phrase complète.",
+                traduction_phrase_corrigee: (langCode === 'en' ? "Write a full sentence." : "완전한 문장을 작성하세요."),
+                ameliorations: langCode === 'ko' ? "직접 작성해 보세요!" : "Lance-toi !"
+            });
+        }
+
+        const prompt = `
+Tu es Emma, une amie française bienveillante (A2-B1).
+Question posée par Emma : "${question}"
+Phrase écrite par l'élève : "${reponseEleve}"
+
+[RÈGLES LINGUISTIQUES STRICTES - RESPECTE LA LANGUE CIBLE]
+1. "reponse_amicale" : Toujours en Français naturel, simple et chaleureux (niveau A2-B1).
+2. "traduction_reponse" : Traduction exacte de la réponse d'Emma en ${langueTraduction}.
+3. "phrase_corrigee" : La phrase de l'élève correctement réécrite en Français.
+4. "traduction_phrase_corrigee" : Traduction de la phrase corrigée en ${langueTraduction}.
+5. EXPLICATIONS DU COIN DU PROF :
+   ${consigneExplications}
+
+[ANTI-HALLUCINATION STRICTE]
+- Regarde VRAIMENT la phrase de l'élève.
+- Si majuscule présente -> INTERDICTION de dire qu'elle manque.
+- Si point (.) présent -> INTERDICTION de dire qu'il manque.
+- Ne signale que les vraies fautes de grammaire, conjugaison, accord ou vocabulaire. Si la phrase est bonne, indique qu'il n'y a pas de faute.
+
+Structure JSON STRICTE :
+{
+  "reponse_amicale": "Réponse en français...",
+  "traduction_reponse": "Traduction en ${langueTraduction}...",
+  "ce_qui_est_bien": "Point positif...",
+  "les_fautes": "Explication des fautes...",
+  "phrase_corrigee": "Phrase correcte en français...",
+  "traduction_phrase_corrigee": "Traduction en ${langueTraduction}...",
+  "ameliorations": "Conseil d'amélioration..."
+}
+`;
+        const contents = [{ parts: [{ text: prompt }] }];
+        const modeles = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+        let resJson = null;
+        for (const m of modeles) {
+            try {
+                resJson = await appelerGeminiStrict(contents, m, apiKey);
+                if (resJson) break;
+            } catch(e) {}
+        }
+        res.json(resJson);
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 4. ENDPOINT GÉNÉRATION D'ENTRAÎNEMENT (FLASH LITE)
+app.post('/api/generer-entrainement', async (req, res) => {
+    try {
+        const apiKey = obtenirCleGemini(req);
+        if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
+
+        const { titreSource, contexteExemples, format, nbPhrases } = req.body;
+        const nombre = Math.min(Math.max(parseInt(nbPhrases) || 5, 3), 15);
+        const typeFormat = format === 'text' ? 'text' : 'select';
+
+        const prompt = `
+Tu es un professeur de FLE créant des exercices d'entraînement.
+Thème : "${titreSource}"
+Exemples : ${JSON.stringify(contexteExemples || []).slice(0, 800)}
+Génère ${nombre} phrases avec un trou "____".
+
+Structure JSON :
+{
+  "titre": "Entraînement : ${titreSource}",
+  "phrases": [
+    {
+      "q": "Phrase modèle avec ____.",
+      "type": "${typeFormat}",
+      ${typeFormat === 'select' ? '"options": ["choix1", "choix2", "choix3"],' : ''}
+      "a": ["bonne_reponse"]
+    }
+  ]
+}
+`;
+        const contents = [{ parts: [{ text: prompt }] }];
+        const modeles = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+        let resJson = null;
+        for (const m of modeles) {
+            try {
+                resJson = await appelerGeminiStrict(contents, m, apiKey);
+                if (resJson) break;
+            } catch(e) {}
+        }
+        res.json(resJson);
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Serveur French API actif sur le port ${PORT}`));
