@@ -25,7 +25,7 @@ function obtenirCleNanoGPT(req) {
     return process.env.NANOGPT_API_KEY;
 }
 
-// NETTOYEUR ET RÉPARATEUR DE JSON TOLÉRANT
+// NETTOYEUR ET RÉPARATEUR DE JSON
 function parserJSONSansErreur(texteBrut) {
     let t = texteBrut;
     t = t.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
@@ -122,6 +122,35 @@ async function appelerNanoGPTStrict(messages, model, apiKey) {
     }
     throw new Error(`Aucune réponse exploitable renvoyée par ${model}.`);
 }
+
+// =========================================================================
+// NOUVEAU ENDPOINT : RÉCUPÉRATION DYNAMIQUE DE TOUS LES MODÈLES NANOGPT (STYLE SILLYTAVERN)
+// =========================================================================
+app.get('/api/nanogpt-models', async (req, res) => {
+    try {
+        const apiKey = obtenirCleNanoGPT(req);
+        if (!apiKey) return res.status(400).json({ error: "Clé NanoGPT absente." });
+
+        const response = await fetch("https://nano-gpt.com/api/v1/models", {
+            method: "GET",
+            headers: {
+                "Authorization": `Bearer ${apiKey}`,
+                "x-api-key": apiKey
+            }
+        });
+
+        const data = await response.json();
+        if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+
+        // Format OpenAI : data.data est un tableau d'objets avec { id: "nom-modele", ... }
+        const liste = (data.data || []).map(m => m.id).sort();
+        res.json({ models: liste });
+
+    } catch (err) {
+        console.error("Erreur nanogpt-models :", err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // 1. ENDPOINT ANALYSE PDF
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
@@ -283,7 +312,7 @@ Renvoie STRICTEMENT le JSON complet mis à jour :
     }
 });
 
-// 3. ENDPOINT EMMA (RÈGLES LINGUISTIQUES STRICTES PAR LANGUE D'INTERFACE)
+// 3. ENDPOINT EMMA (FLASH LITE)
 app.post('/api/corriger-emma', async (req, res) => {
     try {
         const apiKey = obtenirCleGemini(req);
@@ -296,15 +325,12 @@ app.post('/api/corriger-emma', async (req, res) => {
         let langueTraduction = "";
 
         if (langCode === 'ko') {
-            // INTERFACE CORÉENNE : TOUT LE COIN DU PROF DOIT ÊTRE EN CORÉEN
             consigneExplications = "Rédige IMPÉRATIVEMENT TOUTES les explications pédagogiques ('ce_qui_est_bien', 'les_fautes', 'ameliorations') en CORÉEN (한국어).";
             langueTraduction = "coréen (한국어)";
         } else if (langCode === 'en') {
-            // INTERFACE ANGLAISE : EXPLICATIONS EN ANGLAIS
             consigneExplications = "Rédige IMPÉRATIVEMENT TOUTES les explications pédagogiques ('ce_qui_est_bien', 'les_fautes', 'ameliorations') en ANGLAIS.";
             langueTraduction = "anglais";
         } else {
-            // INTERFACE FRANÇAISE : EXPLICATIONS EN FRANÇAIS, TRADUCTION DE LA RÉPONSE ET DU CORRIGÉ EN CORÉEN
             consigneExplications = "Rédige les explications pédagogiques ('ce_qui_est_bien', 'les_fautes', 'ameliorations') en FRANÇAIS.";
             langueTraduction = "coréen (한국어)";
         }
@@ -326,7 +352,7 @@ Tu es Emma, une amie française bienveillante (A2-B1).
 Question posée par Emma : "${question}"
 Phrase écrite par l'élève : "${reponseEleve}"
 
-[RÈGLES LINGUISTIQUES STRICTES - RESPECTE LA LANGUE CIBLE]
+[RÈGLES DE LANGUE ET TRADUCTION]
 1. "reponse_amicale" : Toujours en Français naturel, simple et chaleureux (niveau A2-B1).
 2. "traduction_reponse" : Traduction exacte de la réponse d'Emma en ${langueTraduction}.
 3. "phrase_corrigee" : La phrase de l'élève correctement réécrite en Français.
