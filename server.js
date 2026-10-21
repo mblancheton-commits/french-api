@@ -123,9 +123,7 @@ async function appelerNanoGPTStrict(messages, model, apiKey) {
     throw new Error(`Aucune réponse exploitable renvoyée par ${model}.`);
 }
 
-// =========================================================================
-// NOUVEAU ENDPOINT : RÉCUPÉRATION DYNAMIQUE DE TOUS LES MODÈLES NANOGPT (STYLE SILLYTAVERN)
-// =========================================================================
+// ENDPOINT LISTE DES MODÈLES NANOGPT
 app.get('/api/nanogpt-models', async (req, res) => {
     try {
         const apiKey = obtenirCleNanoGPT(req);
@@ -142,7 +140,6 @@ app.get('/api/nanogpt-models', async (req, res) => {
         const data = await response.json();
         if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
 
-        // Format OpenAI : data.data est un tableau d'objets avec { id: "nom-modele", ... }
         const liste = (data.data || []).map(m => m.id).sort();
         res.json({ models: liste });
 
@@ -169,9 +166,9 @@ RÈGLE D'EXHAUSTIVITÉ DES EXERCICES :
 - Tu DOIS inclure ABSOLUMENT TOUTES LES QUESTIONS OU PHRASES du document, de la première à la toute dernière sans exception.
 - DÉTECTION DU FORMAT D'EXERCICE :
   * Si l'exercice est à trous : conserve la phrase entière avec ses trous "____".
-  * Si l'exercice est composé de questions ouvertes / réponses libres (ex: "Tu es arrivé(e) quand ?") : conserve l'intitulé exact de la question.
+  * Si l'exercice est composé de questions ouvertes / réponses libres : conserve l'intitulé exact de la question.
 
-Structure JSON STRICTE à renvoyer :
+Structure JSON STRICTE :
 {
   "titre": "Titre exact de la leçon",
   "bloc_cours": {
@@ -196,22 +193,10 @@ Structure JSON STRICTE à renvoyer :
     "questions": [
       {
         "id": 1,
-        "question": {
-          "fr": "Question en français ?",
-          "en": "Question in English ?",
-          "ko": "한국어 질문 ?"
-        },
-        "options": {
-          "fr": ["Option A", "Option B", "Option C"],
-          "en": ["Option A", "Option B", "Option C"],
-          "ko": ["보기 A", "보기 B", "보기 C"]
-        },
+        "question": { "fr": "Question FR ?", "en": "Question EN ?", "ko": "질문 KO ?" },
+        "options": { "fr": ["A", "B", "C"], "en": ["A", "B", "C"], "ko": ["A", "B", "C"] },
         "reponse_correcte_index": 0,
-        "explication": {
-          "fr": "Explication...",
-          "en": "Explanation...",
-          "ko": "정답 해설..."
-        }
+        "explication": { "fr": "Explication...", "en": "Explanation...", "ko": "해설..." }
       }
     ]
   },
@@ -250,14 +235,8 @@ Structure JSON STRICTE à renvoyer :
         }
 
         const messages = [
-            { 
-                role: "system", 
-                content: "Tu es un professeur de FLE expert. Tu inclus 100% de toutes les questions du PDF sans exception. Réponds en JSON strict." 
-            },
-            { 
-                role: "user", 
-                content: `${promptStructure}\n\n[DOCUMENT PDF SOURCE] :\n${texteExtrait}` 
-            }
+            { role: "system", content: "Tu es un professeur de FLE expert. Tu réponds au format JSON strict." },
+            { role: "user", content: `${promptStructure}\n\n[DOCUMENT PDF SOURCE] :\n${texteExtrait}` }
         ];
 
         const resultat = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
@@ -312,7 +291,82 @@ Renvoie STRICTEMENT le JSON complet mis à jour :
     }
 });
 
-// 3. ENDPOINT EMMA (FLASH LITE)
+// =========================================================================
+// 3. NOUVEAU ENDPOINT : GÉNÉRATION D'EXERCICE COMPLET PAR PROMPT PROFESSEUR
+// =========================================================================
+app.post('/api/generer-exercice-prof', async (req, res) => {
+    try {
+        const { promptProf, typeExo, optionsCommunes, nbPhrases, titre } = req.body;
+        const modelChoisi = req.headers['x-model-choice'] || 'deepseek/deepseek-v4.1-flash:thinking';
+        const apiKeyNano = obtenirCleNanoGPT(req);
+        const apiKeyGemini = obtenirCleGemini(req);
+
+        const count = Math.min(Math.max(parseInt(nbPhrases) || 10, 3), 25);
+
+        let consigneFormat = "";
+        if (typeExo === "select-identique") {
+            consigneFormat = `Le quiz utilise un menu déroulant identique pour toutes les phrases. Les choix possibles sont STRICTEMENT : [${optionsCommunes || "imparfait, passé composé"}]. 
+Pour chaque phrase, écris "q" avec le trou "____", définis "type": "select", "options": [les choix ci-dessus], et "a": ["la_bonne_reponse"].`;
+        } else if (typeExo === "select-variable") {
+            consigneFormat = `Le quiz utilise un menu déroulant avec des choix variables adaptés à chaque phrase.
+Pour chaque phrase, écris "q" avec le trou "____", définis "type": "select", "options": [3 ou 4 options plausibles incluant la bonne réponse], et "a": ["la_bonne_reponse"].`;
+        } else if (typeExo === "input-phrase-complete") {
+            consigneFormat = `Le quiz demande à l'élève de réécrire la phrase ENTIÈRE (ex: transformer une phrase, conjuguer les verbes, etc.).
+Dans "q", indique la phrase ou la consigne de départ. Définis "type": "text-full", et "a": ["la phrase complète correcte attendue"].`;
+        } else {
+            // Saisie texte libre sur un trou
+            consigneFormat = `Le quiz demande à l'élève de taper le mot manquant dans le trou.
+Pour chaque phrase, écris "q" avec le trou "____", définis "type": "text", et "a": ["mot_exact_attendu", "variantes_acceptées"].`;
+        }
+
+        const promptGlobal = `
+Tu es un professeur de FLE créateur d'exercices pédagogiques interactifs.
+INSTRUCTION DU PROFESSEUR :
+"${promptProf}"
+
+RÈGLES D'EXÉCUTION :
+1. Crée exactement ${count} phrases adaptées au niveau demandé.
+2. ${consigneFormat}
+3. Titre de l'exercice : "${titre || "Exercice de pratique"}"
+
+Structure JSON STRICTE attendue :
+{
+  "titre": "${titre || "Exercice interactif"}",
+  "phrases": [
+    {
+      "q": "Phrase exemple avec ____.",
+      "type": "select ou text ou text-full",
+      "options": ["choix1", "choix2"], // uniquement si type == select
+      "a": ["bonne_reponse"]
+    }
+  ]
+}
+`;
+
+        let resultatJson = null;
+
+        if (modelChoisi.startsWith("gemini")) {
+            if (!apiKeyGemini) return res.status(500).json({ error: "Clé Gemini absente." });
+            const contents = [{ parts: [{ text: promptGlobal }] }];
+            resultatJson = await appelerGeminiStrict(contents, modelChoisi, apiKeyGemini);
+        } else {
+            if (!apiKeyNano) return res.status(500).json({ error: "Clé NanoGPT absente." });
+            const messages = [
+                { role: "system", content: "Tu es un professeur de FLE. Réponds TOUJOURS au format JSON strict." },
+                { role: "user", content: promptGlobal }
+            ];
+            resultatJson = await appelerNanoGPTStrict(messages, modelChoisi, apiKeyNano);
+        }
+
+        res.json(resultatJson);
+
+    } catch (err) {
+        console.error("Erreur generer-exercice-prof :", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 4. ENDPOINT EMMA (FLASH LITE)
 app.post('/api/corriger-emma', async (req, res) => {
     try {
         const apiKey = obtenirCleGemini(req);
@@ -353,7 +407,7 @@ Question posée par Emma : "${question}"
 Phrase écrite par l'élève : "${reponseEleve}"
 
 [RÈGLES DE LANGUE ET TRADUCTION]
-1. "reponse_amicale" : Toujours en Français naturel, simple et chaleureux (niveau A2-B1).
+1. "reponse_amicale" : Toujours en Français naturel, simple et chaleureux.
 2. "traduction_reponse" : Traduction exacte de la réponse d'Emma en ${langueTraduction}.
 3. "phrase_corrigee" : La phrase de l'élève correctement réécrite en Français.
 4. "traduction_phrase_corrigee" : Traduction de la phrase corrigée en ${langueTraduction}.
@@ -364,17 +418,17 @@ Phrase écrite par l'élève : "${reponseEleve}"
 - Regarde VRAIMENT la phrase de l'élève.
 - Si majuscule présente -> INTERDICTION de dire qu'elle manque.
 - Si point (.) présent -> INTERDICTION de dire qu'il manque.
-- Ne signale que les vraies fautes de grammaire, conjugaison, accord ou vocabulaire. Si la phrase est bonne, indique qu'il n'y a pas de faute.
+- Ne signale que les vraies fautes réelles.
 
 Structure JSON STRICTE :
 {
-  "reponse_amicale": "Réponse en français...",
+  "reponse_amicale": "...",
   "traduction_reponse": "Traduction en ${langueTraduction}...",
-  "ce_qui_est_bien": "Point positif...",
-  "les_fautes": "Explication des fautes...",
-  "phrase_corrigee": "Phrase correcte en français...",
+  "ce_qui_est_bien": "...",
+  "les_fautes": "...",
+  "phrase_corrigee": "...",
   "traduction_phrase_corrigee": "Traduction en ${langueTraduction}...",
-  "ameliorations": "Conseil d'amélioration..."
+  "ameliorations": "..."
 }
 `;
         const contents = [{ parts: [{ text: prompt }] }];
@@ -393,7 +447,7 @@ Structure JSON STRICTE :
     }
 });
 
-// 4. ENDPOINT GÉNÉRATION D'ENTRAÎNEMENT (FLASH LITE)
+// 5. ENDPOINT ENTRAÎNEMENT ÉLÈVE
 app.post('/api/generer-entrainement', async (req, res) => {
     try {
         const apiKey = obtenirCleGemini(req);
