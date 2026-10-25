@@ -25,7 +25,6 @@ function obtenirCleNanoGPT(req) {
     return process.env.NANOGPT_API_KEY;
 }
 
-// NETTOYEUR ET RÉPARATEUR DE JSON
 function parserJSONSansErreur(texteBrut) {
     let t = texteBrut;
     t = t.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
@@ -73,7 +72,6 @@ function parserJSONSansErreur(texteBrut) {
     }
 }
 
-// APPEL GEMINI
 async function appelerGeminiStrict(contents, model, apiKey) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const response = await fetch(url, {
@@ -94,7 +92,6 @@ async function appelerGeminiStrict(contents, model, apiKey) {
     throw new Error("Réponse vide reçue de Gemini.");
 }
 
-// APPEL NANOGPT
 async function appelerNanoGPTStrict(messages, model, apiKey) {
     if (!apiKey) throw new Error("Clé API NanoGPT manquante.");
 
@@ -123,32 +120,6 @@ async function appelerNanoGPTStrict(messages, model, apiKey) {
     throw new Error(`Aucune réponse exploitable renvoyée par ${model}.`);
 }
 
-// ENDPOINT LISTE DES MODÈLES NANOGPT
-app.get('/api/nanogpt-models', async (req, res) => {
-    try {
-        const apiKey = obtenirCleNanoGPT(req);
-        if (!apiKey) return res.status(400).json({ error: "Clé NanoGPT absente." });
-
-        const response = await fetch("https://nano-gpt.com/api/v1/models", {
-            method: "GET",
-            headers: {
-                "Authorization": `Bearer ${apiKey}`,
-                "x-api-key": apiKey
-            }
-        });
-
-        const data = await response.json();
-        if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-
-        const liste = (data.data || []).map(m => m.id).sort();
-        res.json({ models: liste });
-
-    } catch (err) {
-        console.error("Erreur nanogpt-models :", err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
 // 1. ENDPOINT ANALYSE PDF
 app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
     try {
@@ -157,7 +128,7 @@ app.post('/api/analyser-pdf', upload.single('pdf'), async (req, res) => {
         const modelChoisi = req.headers['x-model-choice'] || 'deepseek/deepseek-v4.1-flash:thinking';
         
         const promptStructure = `
-Tu es un professeur expert de Français Langue Étrangère (FLE). Analyse ce document pédagogique et structure-le rigoureusement.
+Tu es un professeur expert de FLE. Analyse ce document pédagogique et structure-le rigoureusement.
 
 RÈGLE DU COURS AÉRÉ :
 - Dans chaque slide de cours (dans "contenu_fr", "contenu_en" et "contenu_ko"), mets un double saut de ligne (\\n\\n) après chaque phrase ou exemple pour aérer la lecture.
@@ -168,7 +139,7 @@ RÈGLE D'EXHAUSTIVITÉ DES EXERCICES :
   * Si l'exercice est à trous : conserve la phrase entière avec ses trous "____".
   * Si l'exercice est composé de questions ouvertes / réponses libres : conserve l'intitulé exact de la question.
 
-Structure JSON STRICTE :
+Structure JSON STRICTE à renvoyer :
 {
   "titre": "Titre exact de la leçon",
   "bloc_cours": {
@@ -193,10 +164,10 @@ Structure JSON STRICTE :
     "questions": [
       {
         "id": 1,
-        "question": { "fr": "Question FR ?", "en": "Question EN ?", "ko": "질문 KO ?" },
+        "question": { "fr": "Question en français ?", "en": "Question in English ?", "ko": "한국어 질문 ?" },
         "options": { "fr": ["A", "B", "C"], "en": ["A", "B", "C"], "ko": ["A", "B", "C"] },
         "reponse_correcte_index": 0,
-        "explication": { "fr": "Explication...", "en": "Explanation...", "ko": "해설..." }
+        "explication": { "fr": "Explication...", "en": "Explanation...", "ko": "정답 해설..." }
       }
     ]
   },
@@ -291,7 +262,7 @@ Renvoie STRICTEMENT le JSON complet mis à jour :
     }
 });
 
-// 3. ENDPOINT GÉNÉRATION D'EXERCICE PAR PROMPT
+// 3. ENDPOINT GÉNÉRATION EXERCICE PROF PAR PROMPT
 app.post('/api/generer-exercice-prof', async (req, res) => {
     try {
         const { promptProf, typeExo, optionsCommunes, nbPhrases, titre } = req.body;
@@ -364,7 +335,7 @@ Structure JSON STRICTE attendue :
 });
 
 // =========================================================================
-// 4. ENDPOINT EMMA : CORRECTION ET SUGGESTION D'ARGUMENT DELF B1/B2
+// 4. ENDPOINT EMMA : CORRECTION + ARGUMENTATION DIALECTIQUE DELF B1/B2
 // =========================================================================
 app.post('/api/corriger-emma', async (req, res) => {
     try {
@@ -390,15 +361,22 @@ app.post('/api/corriger-emma', async (req, res) => {
 
         const estModeDelf = (modeDelf === true || modeDelf === "true");
 
-        let consigneDelfSupplementaire = "";
+        let consigneDelfStructure = "";
         if (estModeDelf) {
-            consigneDelfSupplementaire = `
-[CONSIGNE SPÉCIALE DELF B1/B2 - ARGUMENTATION ET DÉBAT]
-Ce devoir prépare l'élève à l'épreuve d'expression orale du DELF B1 ou B2.
-Dans le champ "argument_delf" :
-- Propose un NOUVEL argument ou contre-argument percutant, pertinent et nuancé pour enrichir son idée sur la question posée.
-- Utilise des connecteurs logiques de niveau B1/B2 (ex: "En outre...", "Cependant...", "Il ne faut pas négliger le fait que...", "Par conséquent...").
-- Dans "traduction_argument_delf", donne la traduction fidèle de cet argument en ${langueTraduction}.
+            consigneDelfStructure = `
+[CONSIGNE SPÉCIALE DELF B1/B2 - ENRICHISSEMENT DIALECTIQUE ET CONNECTEURS VARIÉS]
+L'élève s'entraîne à l'oral du DELF B1/B2. Interdiction formelle de répéter toujours la même formule ("Cependant, il ne faut pas négliger...").
+Tu dois fournir DEUX perspectives distinctes pour lui apprendre à construire un exposé :
+
+1. "argument_pour" (Thèse / Prolongement de son idée) :
+   - Donne un argument solide qui valide ou prolonge le point de vue de l'élève.
+   - Utilise OBLIGATOIREMENT un connecteur d'addition varié (ex: "En effet...", "De plus...", "Par ailleurs...", "En outre...", "D'ailleurs...", "Sans compter que...").
+   - Dans "traduction_argument_pour", traduis cet argument fidèlement en ${langueTraduction}.
+
+2. "argument_contre" (Antithèse / Nuance pour le débat) :
+   - Donne un argument opposé ou une nuance constructive pour équilibrer la réflexion.
+   - Utilise OBLIGATOIREMENT un connecteur d'opposition ou de concession varié (ex: "Cependant...", "En revanche...", "Néanmoins...", "Toutefois...", "D'un autre côté...", "Certes... mais...").
+   - Dans "traduction_argument_contre", traduis cette nuance fidèlement en ${langueTraduction}.
 `;
         }
 
@@ -411,8 +389,10 @@ Dans le champ "argument_delf" :
                 phrase_corrigee: "Écris une phrase complète.",
                 traduction_phrase_corrigee: (langCode === 'en' ? "Write a full sentence." : "완전한 문장을 작성하세요."),
                 ameliorations: langCode === 'ko' ? "직접 작성해 보세요!" : "Lance-toi !",
-                argument_delf: estModeDelf ? "Donne ton avis avec des arguments pour t'entraîner au DELF !" : null,
-                traduction_argument_delf: null
+                argument_pour: null,
+                traduction_argument_pour: null,
+                argument_contre: null,
+                traduction_argument_contre: null
             });
         }
 
@@ -428,7 +408,7 @@ ${consigneExplications}
 - "phrase_corrigee" : La phrase de l'élève correctement réécrite en Français.
 - "traduction_phrase_corrigee" : Traduction de la phrase corrigée en ${langueTraduction}.
 
-${consigneDelfSupplementaire}
+${consigneDelfStructure}
 
 [ANTI-HALLUCINATION STRICTE]
 - Regarde VRAIMENT la phrase de l'élève.
@@ -445,8 +425,10 @@ Structure JSON STRICTE :
   "phrase_corrigee": "Phrase correcte en français...",
   "traduction_phrase_corrigee": "Traduction en ${langueTraduction}...",
   "ameliorations": "Conseil d'amélioration...",
-  "argument_delf": ${estModeDelf ? `"Nouvel argument de niveau B1/B2 avec connecteur logique..."` : `null`},
-  "traduction_argument_delf": ${estModeDelf ? `"Traduction de l'argument en ${langueTraduction}..."` : `null`}
+  "argument_pour": ${estModeDelf ? `"Argument renforçant l'idée de l'élève avec connecteur d'addition..."` : `null`},
+  "traduction_argument_pour": ${estModeDelf ? `"Traduction en ${langueTraduction}..."` : `null`},
+  "argument_contre": ${estModeDelf ? `"Contre-argument / nuance avec connecteur d'opposition..."` : `null`},
+  "traduction_argument_contre": ${estModeDelf ? `"Traduction en ${langueTraduction}..."` : `null`}
 }
 `;
         const contents = [{ parts: [{ text: prompt }] }];
