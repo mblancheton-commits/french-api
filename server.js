@@ -291,9 +291,7 @@ Renvoie STRICTEMENT le JSON complet mis à jour :
     }
 });
 
-// =========================================================================
-// 3. NOUVEAU ENDPOINT : GÉNÉRATION D'EXERCICE COMPLET PAR PROMPT PROFESSEUR
-// =========================================================================
+// 3. ENDPOINT GÉNÉRATION D'EXERCICE PAR PROMPT
 app.post('/api/generer-exercice-prof', async (req, res) => {
     try {
         const { promptProf, typeExo, optionsCommunes, nbPhrases, titre } = req.body;
@@ -311,10 +309,9 @@ Pour chaque phrase, écris "q" avec le trou "____", définis "type": "select", "
             consigneFormat = `Le quiz utilise un menu déroulant avec des choix variables adaptés à chaque phrase.
 Pour chaque phrase, écris "q" avec le trou "____", définis "type": "select", "options": [3 ou 4 options plausibles incluant la bonne réponse], et "a": ["la_bonne_reponse"].`;
         } else if (typeExo === "input-phrase-complete") {
-            consigneFormat = `Le quiz demande à l'élève de réécrire la phrase ENTIÈRE (ex: transformer une phrase, conjuguer les verbes, etc.).
+            consigneFormat = `Le quiz demande à l'élève de réécrire la phrase ENTIÈRE.
 Dans "q", indique la phrase ou la consigne de départ. Définis "type": "text-full", et "a": ["la phrase complète correcte attendue"].`;
         } else {
-            // Saisie texte libre sur un trou
             consigneFormat = `Le quiz demande à l'élève de taper le mot manquant dans le trou.
 Pour chaque phrase, écris "q" avec le trou "____", définis "type": "text", et "a": ["mot_exact_attendu", "variantes_acceptées"].`;
         }
@@ -336,7 +333,7 @@ Structure JSON STRICTE attendue :
     {
       "q": "Phrase exemple avec ____.",
       "type": "select ou text ou text-full",
-      "options": ["choix1", "choix2"], // uniquement si type == select
+      "options": ["choix1", "choix2"],
       "a": ["bonne_reponse"]
     }
   ]
@@ -366,13 +363,15 @@ Structure JSON STRICTE attendue :
     }
 });
 
-// 4. ENDPOINT EMMA (FLASH LITE)
+// =========================================================================
+// 4. ENDPOINT EMMA : CORRECTION ET SUGGESTION D'ARGUMENT DELF B1/B2
+// =========================================================================
 app.post('/api/corriger-emma', async (req, res) => {
     try {
         const apiKey = obtenirCleGemini(req);
         if (!apiKey) return res.status(500).json({ error: "Clé Gemini absente." });
 
-        const { question, reponseEleve, langue } = req.body;
+        const { question, reponseEleve, langue, modeDelf } = req.body;
         const langCode = (langue || 'fr').toLowerCase();
 
         let consigneExplications = "";
@@ -389,6 +388,20 @@ app.post('/api/corriger-emma', async (req, res) => {
             langueTraduction = "coréen (한국어)";
         }
 
+        const estModeDelf = (modeDelf === true || modeDelf === "true");
+
+        let consigneDelfSupplementaire = "";
+        if (estModeDelf) {
+            consigneDelfSupplementaire = `
+[CONSIGNE SPÉCIALE DELF B1/B2 - ARGUMENTATION ET DÉBAT]
+Ce devoir prépare l'élève à l'épreuve d'expression orale du DELF B1 ou B2.
+Dans le champ "argument_delf" :
+- Propose un NOUVEL argument ou contre-argument percutant, pertinent et nuancé pour enrichir son idée sur la question posée.
+- Utilise des connecteurs logiques de niveau B1/B2 (ex: "En outre...", "Cependant...", "Il ne faut pas négliger le fait que...", "Par conséquent...").
+- Dans "traduction_argument_delf", donne la traduction fidèle de cet argument en ${langueTraduction}.
+`;
+        }
+
         if (!reponseEleve || !reponseEleve.trim()) {
             return res.json({
                 reponse_amicale: "Tu n'as rien écrit ! N'aie pas peur d'essayer. 😊",
@@ -397,38 +410,43 @@ app.post('/api/corriger-emma', async (req, res) => {
                 les_fautes: langCode === 'ko' ? "답변이 비어 있습니다." : "La réponse est vide.",
                 phrase_corrigee: "Écris une phrase complète.",
                 traduction_phrase_corrigee: (langCode === 'en' ? "Write a full sentence." : "완전한 문장을 작성하세요."),
-                ameliorations: langCode === 'ko' ? "직접 작성해 보세요!" : "Lance-toi !"
+                ameliorations: langCode === 'ko' ? "직접 작성해 보세요!" : "Lance-toi !",
+                argument_delf: estModeDelf ? "Donne ton avis avec des arguments pour t'entraîner au DELF !" : null,
+                traduction_argument_delf: null
             });
         }
 
         const prompt = `
-Tu es Emma, une amie française bienveillante (A2-B1).
+Tu es Emma, une amie française bienveillante.
 Question posée par Emma : "${question}"
 Phrase écrite par l'élève : "${reponseEleve}"
 
 [RÈGLES DE LANGUE ET TRADUCTION]
-1. "reponse_amicale" : Toujours en Français naturel, simple et chaleureux.
-2. "traduction_reponse" : Traduction exacte de la réponse d'Emma en ${langueTraduction}.
-3. "phrase_corrigee" : La phrase de l'élève correctement réécrite en Français.
-4. "traduction_phrase_corrigee" : Traduction de la phrase corrigée en ${langueTraduction}.
-5. EXPLICATIONS DU COIN DU PROF :
-   ${consigneExplications}
+${consigneExplications}
+- "reponse_amicale" : Toujours en Français naturel, simple et chaleureux.
+- "traduction_reponse" : Traduction exacte de la réponse d'Emma en ${langueTraduction}.
+- "phrase_corrigee" : La phrase de l'élève correctement réécrite en Français.
+- "traduction_phrase_corrigee" : Traduction de la phrase corrigée en ${langueTraduction}.
+
+${consigneDelfSupplementaire}
 
 [ANTI-HALLUCINATION STRICTE]
 - Regarde VRAIMENT la phrase de l'élève.
 - Si majuscule présente -> INTERDICTION de dire qu'elle manque.
 - Si point (.) présent -> INTERDICTION de dire qu'il manque.
-- Ne signale que les vraies fautes réelles.
+- Ne signale que les vraies fautes réelles de grammaire, conjugaison, accord ou vocabulaire.
 
 Structure JSON STRICTE :
 {
-  "reponse_amicale": "...",
+  "reponse_amicale": "Réponse en français...",
   "traduction_reponse": "Traduction en ${langueTraduction}...",
-  "ce_qui_est_bien": "...",
-  "les_fautes": "...",
-  "phrase_corrigee": "...",
+  "ce_qui_est_bien": "Point positif...",
+  "les_fautes": "Explication des fautes...",
+  "phrase_corrigee": "Phrase correcte en français...",
   "traduction_phrase_corrigee": "Traduction en ${langueTraduction}...",
-  "ameliorations": "..."
+  "ameliorations": "Conseil d'amélioration...",
+  "argument_delf": ${estModeDelf ? `"Nouvel argument de niveau B1/B2 avec connecteur logique..."` : `null`},
+  "traduction_argument_delf": ${estModeDelf ? `"Traduction de l'argument en ${langueTraduction}..."` : `null`}
 }
 `;
         const contents = [{ parts: [{ text: prompt }] }];
